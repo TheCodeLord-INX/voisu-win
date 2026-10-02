@@ -397,6 +397,60 @@ impl ClipboardInjector {
         Ok(())
     }
 
+    /// Synthesizes synthetic Ctrl+Z key combination to undo the previous dictation paste.
+    pub fn synthesize_ctrl_z(&self) -> Result<(), DeliveryError> {
+        const VK_Z_CODE: u16 = 0x5A;
+
+        let mut inputs = [
+            create_key_input(VK_CONTROL, 0),
+            create_key_input(VK_Z_CODE, 0),
+            create_key_input(VK_Z_CODE, KEYEVENTF_KEYUP),
+            create_key_input(VK_CONTROL, KEYEVENTF_KEYUP),
+        ];
+
+        let sent = unsafe {
+            SendInput(
+                inputs.len() as u32,
+                inputs.as_mut_ptr(),
+                std::mem::size_of::<INPUT>() as i32,
+            )
+        };
+
+        if sent != inputs.len() as u32 {
+            return Err(DeliveryError::SendInputFailed);
+        }
+
+        Ok(())
+    }
+
+    /// Erases characters using synthetic Backspace keystrokes.
+    pub fn erase_characters(&self, count: usize) -> Result<(), DeliveryError> {
+        if count == 0 {
+            return Ok(());
+        }
+        use windows_sys::Win32::UI::Input::KeyboardAndMouse::VK_BACK;
+
+        let mut inputs = Vec::with_capacity(count * 2);
+        for _ in 0..count {
+            inputs.push(create_key_input(VK_BACK, 0));
+            inputs.push(create_key_input(VK_BACK, KEYEVENTF_KEYUP));
+        }
+
+        let sent = unsafe {
+            SendInput(
+                inputs.len() as u32,
+                inputs.as_mut_ptr(),
+                std::mem::size_of::<INPUT>() as i32,
+            )
+        };
+
+        if sent != inputs.len() as u32 {
+            return Err(DeliveryError::SendInputFailed);
+        }
+
+        Ok(())
+    }
+
     /// Helper to attempt opening clipboard with backoff retry.
     unsafe fn open_clipboard_retry(&self, hwnd: HWND, max_retries: usize) -> bool {
         for attempt in 0..max_retries {

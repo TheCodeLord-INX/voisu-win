@@ -394,6 +394,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                                                 String::new()
                                                             };
 
+                                                            // Check for voice editing command ("scratch that" / "undo that")
+                                                            if FormattingEngine::is_scratch_command(&candidate_text) {
+                                                                println!("  [COMMAND] Spoken 'scratch that' detected. Reverting last dictation...");
+                                                                let _ = inj.synthesize_ctrl_z();
+                                                                println!("------------------------------------------------------------");
+                                                                overlay_done.set_done();
+                                                                tokio::time::sleep(Duration::from_millis(800)).await;
+                                                                overlay_done.hide();
+                                                                return;
+                                                            }
+
                                                             // Deterministic Spoken Punctuation & Formatting
                                                             let formatted = FormattingEngine::format(&candidate_text);
                                                             if formatted.trim().is_empty() {
