@@ -8,6 +8,7 @@
 use clap::{Parser, Subcommand};
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::task::JoinHandle;
 use voisu_win::config::AppConfig;
 use voisu_win::core::arbitration::ArbitrationEngine;
@@ -19,6 +20,7 @@ use voisu_win::delivery::ClipboardInjector;
 use voisu_win::doctor::SystemDoctor;
 use voisu_win::providers::DualProviderCoordinator;
 use voisu_win::providers::deepgram::DeepgramError;
+use voisu_win::ui::{OverlayController, TrayEvent, TrayManager};
 
 #[derive(Parser, Debug)]
 #[command(
@@ -110,6 +112,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let injector = Arc::new(ClipboardInjector::new(config.clipboard_restore_timeout_ms));
             let delivery_mode = config.delivery_mode;
 
+            // Initialize UI Overlay and System Tray
+            let overlay = Arc::new(OverlayController::new());
+            let tray = Arc::new(TrayManager::new());
+            tray.set_tooltip(&format!(
+                "Voisu Dictation (Active: {:?})",
+                config.trigger_key
+            ));
+
             let (hotkey_mgr, hotkey_rx) =
                 match HotkeyManager::start(config.trigger_key, config.interaction_mode) {
                     Ok((mgr, rx)) => {
@@ -153,33 +163,75 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         }
                     })?;
 
+                let mut tray_interval = tokio::time::interval(Duration::from_millis(100));
+
                 loop {
                     tokio::select! {
                         _ = tokio::signal::ctrl_c() => {
                             println!("\n[SHUTDOWN] Ctrl+C received. Cleaning up...");
                             break;
                         }
+                        _ = tray_interval.tick() => {
+                            if let Some(tray_event) = tray.try_recv_event() {
+                                match tray_event {
+                                    TrayEvent::RunDoctor => {
+                                        println!("\n[TRAY] Running diagnostics on request...");
+                                        SystemDoctor::run_diagnostics(&config).await;
+                                    }
+                                    TrayEvent::OpenConfig => {
+                                        println!("[TRAY] Opening configuration folder...");
+                                        if let Some(config_dir) = dirs::config_dir() {
+                                            let app_dir = config_dir.join("voisu");
+                                            let _ = std::fs::create_dir_all(&app_dir);
+                                            let _ = std::process::Command::new("explorer.exe")
+                                                .arg(&app_dir)
+                                                .spawn();
+                                        }
+                                    }
+                                    TrayEvent::Exit => {
+                                        println!("\n[TRAY] Exit requested from system tray menu.");
+                                        break;
+                                    }
+                                }
+                            }
+                        }
                         event = event_async_rx.recv() => {
                             match event {
                                 Some(HotkeyEvent::StartRecording) => {
                                     println!("[● RECORDING] Listening... Speak now.");
+                                    overlay.set_recording(0.2);
                                     match engine.start_session() {
-                                        Ok((frame_rx, session)) => {
-                                            let dg_task = coordinator.start_deepgram_stream(frame_rx);
+                                        Ok((mut frame_rx, session)) => {
+                                            // Tap audio frames for live RMS UI feedback and feed to Deepgram
+                                            let (dg_tx, dg_rx) = tokio::sync::mpsc::channel(64);
+                                            let overlay_feed = Arc::clone(&overlay);
+                                            tokio::spawn(async move {
+                                                while let Some(frame) = frame_rx.recv().await {
+                                                    overlay_feed.set_recording(frame.rms_level);
+                                                    if dg_tx.send(frame).await.is_err() {
+                                                        break;
+                                                    }
+                                                }
+                                            });
+
+                                            let dg_task = coordinator.start_deepgram_stream(dg_rx);
                                             current_session = Some((dg_task, session));
                                         }
                                         Err(e) => {
                                             eprintln!("[ERROR] Failed to start audio session: {}", e);
+                                            overlay.hide();
                                         }
                                     }
                                 }
                                 Some(HotkeyEvent::StopRecording) => {
                                     println!("[◼ PROCESSING] Utterance complete. Racing Deepgram & Groq LPUs...");
+                                    overlay.set_processing();
                                     if let Some((dg_task, session)) = current_session.take() {
                                         match session.stop() {
                                             Ok((_, wav_bytes)) => {
                                                 let coord = Arc::clone(&coordinator);
                                                 let inj = Arc::clone(&injector);
+                                                let overlay_done = Arc::clone(&overlay);
                                                 tokio::spawn(async move {
                                                     match coord.resolve_race(dg_task, wav_bytes).await {
                                                         Ok(result) => {
@@ -213,18 +265,29 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                                                 } else {
                                                                     println!("[DELIVERED] Injected into focused window via {:?}.", delivery_mode);
                                                                 }
+
+                                                                // Visual Pill Feedback: Show Done for 800ms then hide
+                                                                overlay_done.set_done();
+                                                                tokio::time::sleep(Duration::from_millis(800)).await;
+                                                                overlay_done.hide();
+                                                            } else {
+                                                                overlay_done.hide();
                                                             }
                                                         }
                                                         Err(e) => {
                                                             eprintln!("[ERROR] Transcription race failed: {}", e);
+                                                            overlay_done.hide();
                                                         }
                                                     }
                                                 });
                                             }
                                             Err(e) => {
                                                 eprintln!("[ERROR] Failed to stop recording session: {}", e);
+                                                overlay.hide();
                                             }
                                         }
+                                    } else {
+                                        overlay.hide();
                                     }
                                 }
                                 None => break,
@@ -236,6 +299,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 tokio::signal::ctrl_c().await?;
             }
 
+            // Graceful shutdown cleanup
+            overlay.close();
+            tray.close();
             if let Some(mgr) = hotkey_mgr {
                 mgr.stop();
             }

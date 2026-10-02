@@ -300,8 +300,10 @@ mod tests {
         let temp_dir = tempfile::tempdir().unwrap();
         let config_file = temp_dir.path().join("config.json");
 
-        let mut config = AppConfig::default();
-        config.deepgram_api_key = Some("test_secret".into());
+        let config = AppConfig {
+            deepgram_api_key: Some("test_secret".into()),
+            ..Default::default()
+        };
         config.save_to_path(&config_file).unwrap();
 
         assert!(config_file.exists());
