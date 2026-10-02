@@ -18,6 +18,10 @@ pub const GROQ_TRANSCRIPTION_URL: &str = "https://api.groq.com/openai/v1/audio/t
 
 pub const GROQ_WHISPER_MODEL: &str = "whisper-large-v3-turbo";
 
+/// Pre-conditioned linguistic anchor prompt ensuring Whisper generates Latin script
+/// for Hindi phonemes and common Indian names/places without manual dictionary files.
+pub const DEFAULT_WHISPER_ANCHOR_PROMPT: &str = "Conversational English, Indian English, and Romanized Hinglish in Latin script. Common terms: Namaste, kya haal hai, kaise ho, theek hai, bilkul, sahi hai, yaar, bhai, accha, suno, batao, chalo, dekhte hain, matlab, thoda, bohot, kuch, nahi, hum, aap, tum, log, baat, kaam, code, testing, meeting, call, IIT, Madras, Aditya, Sharma, Verma, Singh, Kumar.";
+
 #[derive(Error, Debug)]
 pub enum GroqError {
     #[error("HTTP request error: {0}")]
@@ -114,6 +118,7 @@ impl GroqClient {
             .text("response_format", "verbose_json")
             .text("timestamp_granularities[]", "word")
             .text("language", self.language.clone())
+            .text("prompt", DEFAULT_WHISPER_ANCHOR_PROMPT.to_string())
             .text("temperature", "0.0");
 
         let response = self

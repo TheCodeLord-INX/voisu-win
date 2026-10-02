@@ -8,6 +8,7 @@ use crate::config::AppConfig;
 use crate::core::types::{AudioFrame, SourceTranscript};
 use crate::providers::deepgram::{DeepgramClient, DeepgramError};
 use crate::providers::groq::GroqClient;
+use crate::providers::reconciler::GroqReconciler;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
@@ -55,6 +56,7 @@ impl DualProviderResult {
 pub struct DualProviderCoordinator {
     deepgram_client: Option<Arc<DeepgramClient>>,
     groq_client: Option<Arc<GroqClient>>,
+    reconciler: Option<Arc<GroqReconciler>>,
 }
 
 impl DualProviderCoordinator {
@@ -71,9 +73,16 @@ impl DualProviderCoordinator {
             .filter(|k| !k.trim().is_empty())
             .map(|k| Arc::new(GroqClient::with_language(k, &config.language)));
 
+        let reconciler = config
+            .groq_api_key
+            .as_ref()
+            .filter(|k| !k.trim().is_empty())
+            .map(|k| Arc::new(GroqReconciler::new(k)));
+
         Self {
             deepgram_client,
             groq_client,
+            reconciler,
         }
     }
 
@@ -83,6 +92,10 @@ impl DualProviderCoordinator {
 
     pub fn has_groq(&self) -> bool {
         self.groq_client.is_some()
+    }
+
+    pub fn reconciler(&self) -> Option<Arc<GroqReconciler>> {
+        self.reconciler.clone()
     }
 
     /// Check if Groq rate limits are nearing exhaustion.

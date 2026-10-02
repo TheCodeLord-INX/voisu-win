@@ -10,6 +10,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::task::JoinHandle;
+use tracing::warn;
 use voisu_win::config::AppConfig;
 use voisu_win::core::arbitration::ArbitrationEngine;
 use voisu_win::core::audio::{AudioCaptureEngine, RecordingSession};
@@ -251,8 +252,39 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                                                 println!("  [Groq Whisper]    ({}ms): {}", gq.latency_ms, gq.raw_text);
                                                             }
 
-                                                            // Asymmetric Slice B4 Arbitration
-                                                            if let Some(arb) = ArbitrationEngine::arbitrate(result.deepgram, result.groq) {
+                                                            // Check for Groq LPU Semantic Reconciliation on provider disagreements
+                                                            let reconciled_text = match (&result.deepgram, &result.groq) {
+                                                                (Some(dg), Some(gq)) => {
+                                                                    let dg_text = dg.raw_text.trim();
+                                                                    let gq_text = gq.raw_text.trim();
+
+                                                                    if dg_text.is_empty() || gq_text.is_empty() {
+                                                                        None
+                                                                    } else if dg_text.eq_ignore_ascii_case(gq_text) {
+                                                                        // Identical agreement: deliver immediately (0ms overhead)
+                                                                        None
+                                                                    } else if let Some(reconciler) = coord.reconciler() {
+                                                                        // Semantic reconciliation for Hinglish, Indian names, and acronyms
+                                                                        match reconciler.reconcile(dg_text, gq_text).await {
+                                                                            Ok(res) => {
+                                                                                println!("  [Groq LPU Reconciled] ({}ms): {}", res.latency_ms, res.text);
+                                                                                Some(res.text)
+                                                                            }
+                                                                            Err(e) => {
+                                                                                warn!("Reconciliation skipped: {}. Falling back to Slice B4 arbitration.", e);
+                                                                                None
+                                                                            }
+                                                                        }
+                                                                    } else {
+                                                                        None
+                                                                    }
+                                                                }
+                                                                _ => None,
+                                                            };
+
+                                                            let candidate_text = if let Some(rec) = reconciled_text {
+                                                                rec
+                                                            } else if let Some(arb) = ArbitrationEngine::arbitrate(result.deepgram, result.groq) {
                                                                 if !arb.flipped_regions.is_empty() {
                                                                     println!("  [Arbitration] Applied {} Slice B4 substitutions (Mode: {})", arb.flipped_regions.len(), arb.arbitration_mode);
                                                                     for flip in &arb.flipped_regions {
@@ -261,32 +293,33 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                                                         println!("    - Replaced '{}' -> '{}' ({})", orig_words.join(" "), repl_words.join(" "), flip.arbitration_reason);
                                                                     }
                                                                 }
-
-                                                                // Deterministic Spoken Punctuation & Formatting
-                                                                let formatted = FormattingEngine::format(&arb.selected_text);
-                                                                if formatted.trim().is_empty() {
-                                                                    println!("  [Final Text] (No speech detected)");
-                                                                    println!("------------------------------------------------------------");
-                                                                    overlay_done.hide();
-                                                                    return;
-                                                                }
-                                                                println!("  [Final Text] >>> \"{}\"", formatted);
-                                                                println!("------------------------------------------------------------");
-
-                                                                // Smart Clipboard Delivery into focused window
-                                                                if let Err(e) = inj.deliver(&formatted, delivery_mode) {
-                                                                    eprintln!("[ERROR] Text delivery failed: {}", e);
-                                                                } else {
-                                                                    println!("[DELIVERED] Injected into focused window via {:?}.", delivery_mode);
-                                                                }
-
-                                                                // Visual Pill Feedback: Show Done for 800ms then hide
-                                                                overlay_done.set_done();
-                                                                tokio::time::sleep(Duration::from_millis(800)).await;
-                                                                overlay_done.hide();
+                                                                arb.selected_text
                                                             } else {
+                                                                String::new()
+                                                            };
+
+                                                            // Deterministic Spoken Punctuation & Formatting
+                                                            let formatted = FormattingEngine::format(&candidate_text);
+                                                            if formatted.trim().is_empty() {
+                                                                println!("  [Final Text] (No speech detected)");
+                                                                println!("------------------------------------------------------------");
                                                                 overlay_done.hide();
+                                                                return;
                                                             }
+                                                            println!("  [Final Text] >>> \"{}\"", formatted);
+                                                            println!("------------------------------------------------------------");
+
+                                                            // Smart Clipboard Delivery into focused window
+                                                            if let Err(e) = inj.deliver(&formatted, delivery_mode) {
+                                                                eprintln!("[ERROR] Text delivery failed: {}", e);
+                                                            } else {
+                                                                println!("[DELIVERED] Injected into focused window via {:?}.", delivery_mode);
+                                                            }
+
+                                                            // Visual Pill Feedback: Show Done for 800ms then hide
+                                                            overlay_done.set_done();
+                                                            tokio::time::sleep(Duration::from_millis(800)).await;
+                                                            overlay_done.hide();
                                                         }
                                                         Err(e) => {
                                                             eprintln!("[ERROR] Transcription race failed: {}", e);

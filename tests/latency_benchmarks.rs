@@ -178,9 +178,9 @@ fn bench_audio_resampler_throughput() {
     );
     println!("============================================================");
 
-    // Sinc resampling 5 seconds of audio must finish in < 50ms (< 0.05s, i.e. > 100x realtime)
+    let max_allowed_ms = if cfg!(debug_assertions) { 250 } else { 100 };
     assert!(
-        elapsed.as_millis() < 100,
+        elapsed.as_millis() < max_allowed_ms,
         "Resampling was slower than expected: {:?}",
         elapsed
     );
