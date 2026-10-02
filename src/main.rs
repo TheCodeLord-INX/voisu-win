@@ -10,9 +10,12 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::task::JoinHandle;
 use voisu_win::config::AppConfig;
+use voisu_win::core::arbitration::ArbitrationEngine;
 use voisu_win::core::audio::{AudioCaptureEngine, RecordingSession};
+use voisu_win::core::formatting::FormattingEngine;
 use voisu_win::core::hotkey::{HotkeyEvent, HotkeyManager};
 use voisu_win::core::types::SourceTranscript;
+use voisu_win::delivery::ClipboardInjector;
 use voisu_win::doctor::SystemDoctor;
 use voisu_win::providers::DualProviderCoordinator;
 use voisu_win::providers::deepgram::DeepgramError;
@@ -104,6 +107,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             };
 
             let coordinator = Arc::new(DualProviderCoordinator::new(&config));
+            let injector = Arc::new(ClipboardInjector::new(config.clipboard_restore_timeout_ms));
+            let delivery_mode = config.delivery_mode;
 
             let (hotkey_mgr, hotkey_rx) =
                 match HotkeyManager::start(config.trigger_key, config.interaction_mode) {
@@ -126,12 +131,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 println!("Hold or tap your trigger key to dictate. Press Ctrl+C to exit.\n");
             }
 
-            type ActiveSession = (
-                Option<JoinHandle<Result<SourceTranscript, DeepgramError>>>,
-                RecordingSession,
-            );
-
             if let (Some(engine), Some(rx)) = (audio_engine, hotkey_rx) {
+                type ActiveSession = (
+                    Option<JoinHandle<Result<SourceTranscript, DeepgramError>>>,
+                    RecordingSession,
+                );
+
                 let mut current_session: Option<ActiveSession> = None;
 
                 let (event_async_tx, mut event_async_rx) =
@@ -174,17 +179,41 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                         match session.stop() {
                                             Ok((_, wav_bytes)) => {
                                                 let coord = Arc::clone(&coordinator);
+                                                let inj = Arc::clone(&injector);
                                                 tokio::spawn(async move {
                                                     match coord.resolve_race(dg_task, wav_bytes).await {
                                                         Ok(result) => {
                                                             println!("------------------------------------------------------------");
-                                                            if let Some(dg) = result.deepgram {
+                                                            if let Some(dg) = &result.deepgram {
                                                                 println!("  [Deepgram Nova-2] ({}ms): {}", dg.latency_ms, dg.raw_text);
                                                             }
-                                                            if let Some(gq) = result.groq {
+                                                            if let Some(gq) = &result.groq {
                                                                 println!("  [Groq Whisper]    ({}ms): {}", gq.latency_ms, gq.raw_text);
                                                             }
-                                                            println!("------------------------------------------------------------");
+
+                                                            // Asymmetric Slice B4 Arbitration
+                                                            if let Some(arb) = ArbitrationEngine::arbitrate(result.deepgram, result.groq) {
+                                                                if !arb.flipped_regions.is_empty() {
+                                                                    println!("  [Arbitration] Applied {} Slice B4 substitutions (Mode: {})", arb.flipped_regions.len(), arb.arbitration_mode);
+                                                                    for flip in &arb.flipped_regions {
+                                                                        let orig_words: Vec<&str> = flip.original_tokens.iter().map(|t| t.word.as_str()).collect();
+                                                                        let repl_words: Vec<&str> = flip.replacement_tokens.iter().map(|t| t.word.as_str()).collect();
+                                                                        println!("    - Replaced '{}' -> '{}' ({})", orig_words.join(" "), repl_words.join(" "), flip.arbitration_reason);
+                                                                    }
+                                                                }
+
+                                                                // Deterministic Spoken Punctuation & Formatting
+                                                                let formatted = FormattingEngine::format(&arb.selected_text);
+                                                                println!("  [Final Text] >>> \"{}\"", formatted);
+                                                                println!("------------------------------------------------------------");
+
+                                                                // Smart Clipboard Delivery into focused window
+                                                                if let Err(e) = inj.deliver(&formatted, delivery_mode) {
+                                                                    eprintln!("[ERROR] Text delivery failed: {}", e);
+                                                                } else {
+                                                                    println!("[DELIVERED] Injected into focused window via {:?}.", delivery_mode);
+                                                                }
+                                                            }
                                                         }
                                                         Err(e) => {
                                                             eprintln!("[ERROR] Transcription race failed: {}", e);
