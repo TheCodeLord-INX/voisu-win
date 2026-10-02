@@ -18,8 +18,12 @@ const REG_APP_NAME: &str = "VoisuDictation";
 
 /// Check if Voisu is currently configured to run on Windows startup.
 pub fn is_autostart_enabled() -> bool {
+    is_autostart_enabled_for(REG_APP_NAME)
+}
+
+pub fn is_autostart_enabled_for(app_name: &str) -> bool {
     let subkey_w: Vec<u16> = OsStr::new(RUN_SUBKEY).encode_wide().chain(std::iter::once(0)).collect();
-    let name_w: Vec<u16> = OsStr::new(REG_APP_NAME).encode_wide().chain(std::iter::once(0)).collect();
+    let name_w: Vec<u16> = OsStr::new(app_name).encode_wide().chain(std::iter::once(0)).collect();
 
     unsafe {
         let mut hkey: HKEY = std::mem::zeroed();
@@ -43,14 +47,47 @@ pub fn is_autostart_enabled() -> bool {
     }
 }
 
+/// Resolves the canonical binary path for `voisu-win.exe`, avoiding transient test runners in `target/debug/deps`.
+pub fn resolve_executable_path() -> Result<PathBuf, String> {
+    let current = std::env::current_exe()
+        .map_err(|e| format!("Failed to get current executable path: {}", e))?;
+
+    let file_name = current
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("")
+        .to_lowercase();
+
+    // If running under a test harness binary or from deps, resolve to the compiled release/debug binary
+    if file_name.starts_with("voisu_win-") || current.to_string_lossy().contains("\\deps\\") {
+        if let Some(parent) = current.parent() {
+            if let Some(target_dir) = parent.parent() {
+                let release_bin = target_dir.join("release").join("voisu-win.exe");
+                if release_bin.exists() {
+                    return Ok(release_bin);
+                }
+                let debug_bin = target_dir.join("debug").join("voisu-win.exe");
+                if debug_bin.exists() {
+                    return Ok(debug_bin);
+                }
+            }
+        }
+    }
+
+    Ok(current)
+}
+
 /// Enable Voisu autostart on Windows login (with `--tray` flag for silent background attachment).
 pub fn enable_autostart() -> Result<PathBuf, String> {
-    let exe_path = std::env::current_exe()
-        .map_err(|e| format!("Failed to get current executable path: {}", e))?;
+    enable_autostart_for(REG_APP_NAME)
+}
+
+pub fn enable_autostart_for(app_name: &str) -> Result<PathBuf, String> {
+    let exe_path = resolve_executable_path()?;
 
     let cmd_line = format!("\"{}\" run --tray", exe_path.display());
     let subkey_w: Vec<u16> = OsStr::new(RUN_SUBKEY).encode_wide().chain(std::iter::once(0)).collect();
-    let name_w: Vec<u16> = OsStr::new(REG_APP_NAME).encode_wide().chain(std::iter::once(0)).collect();
+    let name_w: Vec<u16> = OsStr::new(app_name).encode_wide().chain(std::iter::once(0)).collect();
     let val_w: Vec<u16> = OsStr::new(&cmd_line).encode_wide().chain(std::iter::once(0)).collect();
 
     unsafe {
@@ -83,8 +120,12 @@ pub fn enable_autostart() -> Result<PathBuf, String> {
 
 /// Disable Voisu autostart from Windows login.
 pub fn disable_autostart() -> Result<(), String> {
+    disable_autostart_for(REG_APP_NAME)
+}
+
+pub fn disable_autostart_for(app_name: &str) -> Result<(), String> {
     let subkey_w: Vec<u16> = OsStr::new(RUN_SUBKEY).encode_wide().chain(std::iter::once(0)).collect();
-    let name_w: Vec<u16> = OsStr::new(REG_APP_NAME).encode_wide().chain(std::iter::once(0)).collect();
+    let name_w: Vec<u16> = OsStr::new(app_name).encode_wide().chain(std::iter::once(0)).collect();
 
     unsafe {
         let mut hkey: HKEY = std::mem::zeroed();
@@ -123,16 +164,15 @@ mod tests {
 
     #[test]
     fn test_autostart_toggle_roundtrip() {
-        let initial = is_autostart_enabled();
-        // Enable
-        let _ = enable_autostart();
-        assert!(is_autostart_enabled());
-        // Disable
-        let _ = disable_autostart();
-        assert!(!is_autostart_enabled());
-        // Restore initial state
-        if initial {
-            let _ = enable_autostart();
-        }
+        let test_app = "VoisuDictationTest";
+        let _ = disable_autostart_for(test_app);
+        assert!(!is_autostart_enabled_for(test_app));
+
+        let res = enable_autostart_for(test_app);
+        assert!(res.is_ok());
+        assert!(is_autostart_enabled_for(test_app));
+
+        let _ = disable_autostart_for(test_app);
+        assert!(!is_autostart_enabled_for(test_app));
     }
 }

@@ -124,6 +124,13 @@ fn run_tray_thread(
     event_tx: std_mpsc::Sender<TrayEvent>,
     is_alive: Arc<AtomicBool>,
 ) {
+    unsafe {
+        let _ = windows_sys::Win32::System::Com::CoInitializeEx(
+            null_mut(),
+            windows_sys::Win32::System::Com::COINIT_APARTMENTTHREADED as u32,
+        );
+    }
+
     if let Ok(mut guard) = EVENT_SENDER.lock() {
         *guard = Some(event_tx);
     }
@@ -134,12 +141,13 @@ fn run_tray_thread(
         .collect();
 
     let hwnd = unsafe {
+        let h_instance = windows_sys::Win32::System::LibraryLoader::GetModuleHandleW(null_mut());
         let wnd_class = WNDCLASSW {
             style: 0,
             lpfnWndProc: Some(tray_wnd_proc),
             cbClsExtra: 0,
             cbWndExtra: 0,
-            hInstance: null_mut(),
+            hInstance: h_instance,
             hIcon: null_mut(),
             hCursor: null_mut(),
             hbrBackground: null_mut(),
@@ -154,7 +162,7 @@ fn run_tray_thread(
             .chain(std::iter::once(0))
             .collect();
 
-        // Message-only window (HWND_MESSAGE = (-3isize) as HWND)
+        // Top-level hidden window (parent must be NULL for Shell_NotifyIcon to deliver messages)
         CreateWindowExW(
             0,
             class_name.as_ptr(),
@@ -164,9 +172,9 @@ fn run_tray_thread(
             0,
             0,
             0,
-            (-3isize) as HWND,
-            null_mut() as HMENU,
             null_mut(),
+            null_mut() as HMENU,
+            h_instance,
             null_mut(),
         )
     };
@@ -194,7 +202,9 @@ fn run_tray_thread(
 
     let success = unsafe { Shell_NotifyIconW(NIM_ADD, &nid) };
     if success == 0 {
-        warn!("Failed to add icon to system tray via Shell_NotifyIconW.");
+        let err = unsafe { windows_sys::Win32::Foundation::GetLastError() };
+        eprintln!("[TRAY ERROR] Shell_NotifyIconW failed! GetLastError: {}, cbSize: {}, hwnd: {:?}, hicon: {:?}", err, nid.cbSize, hwnd, hicon);
+        warn!("Failed to add icon to system tray via Shell_NotifyIconW (err: {}).", err);
     } else {
         info!("System tray notification icon active.");
     }
@@ -240,6 +250,8 @@ fn run_tray_thread(
         del_nid.hWnd = hwnd;
         del_nid.uID = TRAY_ICON_ID;
         Shell_NotifyIconW(NIM_DELETE, &del_nid);
+
+        windows_sys::Win32::System::Com::CoUninitialize();
     }
 
     is_alive.store(false, Ordering::Relaxed);
