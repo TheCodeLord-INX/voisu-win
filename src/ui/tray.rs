@@ -19,11 +19,11 @@ use windows_sys::Win32::UI::Shell::{
 };
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     AppendMenuW, CreatePopupMenu, CreateWindowExW, DefWindowProcW, DestroyMenu, DestroyWindow,
-    DispatchMessageW, GetCursorPos, GetMessageW, HICON, HMENU, IDI_APPLICATION, LoadIconW,
-    MF_CHECKED, MF_DISABLED, MF_GRAYED, MF_SEPARATOR, MF_STRING, MF_UNCHECKED, MSG,
-    PostQuitMessage, RegisterClassW, SetForegroundWindow, TPM_BOTTOMALIGN, TPM_RETURNCMD,
-    TPM_RIGHTBUTTON, TrackPopupMenu, WM_DESTROY, WM_LBUTTONDBLCLK, WM_RBUTTONUP, WM_USER,
-    WNDCLASSW, WS_OVERLAPPED,
+    DispatchMessageW, GetCursorPos, GetMessageW, HICON, HMENU, IDI_APPLICATION, KillTimer,
+    LoadIconW, MF_CHECKED, MF_DISABLED, MF_GRAYED, MF_SEPARATOR, MF_STRING, MF_UNCHECKED, MSG,
+    PostQuitMessage, RegisterClassW, RegisterWindowMessageW, SetForegroundWindow, SetTimer,
+    TPM_BOTTOMALIGN, TPM_RETURNCMD, TPM_RIGHTBUTTON, TrackPopupMenu, WM_DESTROY, WM_LBUTTONDBLCLK,
+    WM_RBUTTONUP, WM_TIMER, WM_USER, WNDCLASSW, WS_OVERLAPPED,
 };
 
 const WM_TRAYICON: u32 = WM_USER + 101;
@@ -118,6 +118,31 @@ impl Drop for TrayManager {
 // Global thread-local or static state for the tray window proc
 static EVENT_SENDER: std::sync::Mutex<Option<std_mpsc::Sender<TrayEvent>>> =
     std::sync::Mutex::new(None);
+static CURRENT_TOOLTIP: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+static WM_TASKBAR_CREATED: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+
+fn add_or_refresh_tray_icon(hwnd: HWND) -> bool {
+    unsafe {
+        let hicon: HICON = LoadIconW(null_mut(), IDI_APPLICATION);
+        let mut nid: NOTIFYICONDATAW = std::mem::zeroed();
+        nid.cbSize = std::mem::size_of::<NOTIFYICONDATAW>() as u32;
+        nid.hWnd = hwnd;
+        nid.uID = TRAY_ICON_ID;
+        nid.uFlags = NIF_MESSAGE | NIF_ICON | NIF_TIP;
+        nid.uCallbackMessage = WM_TRAYICON;
+        nid.hIcon = hicon;
+
+        let tip_text = CURRENT_TOOLTIP
+            .lock()
+            .ok()
+            .and_then(|g| g.clone())
+            .unwrap_or_else(|| "Voisu - Ultra-Fast STT Dictation (Caps Lock)".to_string());
+        encode_tip(&mut nid.szTip, &tip_text);
+
+        let success = Shell_NotifyIconW(NIM_ADD, &nid);
+        success != 0
+    }
+}
 
 fn run_tray_thread(
     cmd_rx: std_mpsc::Receiver<TrayCommand>,
@@ -185,26 +210,19 @@ fn run_tray_thread(
         return;
     }
 
-    // Load default application icon
-    let hicon: HICON = unsafe { LoadIconW(null_mut(), IDI_APPLICATION) };
+    let taskbar_msg: Vec<u16> = OsStr::new("TaskbarCreated")
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect();
+    let wm_taskbar_created = unsafe { RegisterWindowMessageW(taskbar_msg.as_ptr()) };
+    WM_TASKBAR_CREATED.store(wm_taskbar_created, Ordering::Relaxed);
 
-    // Register tray icon
-    let mut nid: NOTIFYICONDATAW = unsafe { std::mem::zeroed() };
-    nid.cbSize = std::mem::size_of::<NOTIFYICONDATAW>() as u32;
-    nid.hWnd = hwnd;
-    nid.uID = TRAY_ICON_ID;
-    nid.uFlags = NIF_MESSAGE | NIF_ICON | NIF_TIP;
-    nid.uCallbackMessage = WM_TRAYICON;
-    nid.hIcon = hicon;
-
-    let tip_text = "Voisu - Ultra-Fast STT Dictation (Caps Lock)";
-    encode_tip(&mut nid.szTip, tip_text);
-
-    let success = unsafe { Shell_NotifyIconW(NIM_ADD, &nid) };
-    if success == 0 {
-        let err = unsafe { windows_sys::Win32::Foundation::GetLastError() };
-        eprintln!("[TRAY ERROR] Shell_NotifyIconW failed! GetLastError: {}, cbSize: {}, hwnd: {:?}, hicon: {:?}", err, nid.cbSize, hwnd, hicon);
-        warn!("Failed to add icon to system tray via Shell_NotifyIconW (err: {}).", err);
+    let success = add_or_refresh_tray_icon(hwnd);
+    if !success {
+        // If Explorer hasn't finished initializing notification area at Windows boot, retry every second
+        unsafe {
+            SetTimer(hwnd, 1, 1000, None);
+        }
     } else {
         info!("System tray notification icon active.");
     }
@@ -216,6 +234,9 @@ fn run_tray_thread(
         while let Ok(cmd) = cmd_rx.recv() {
             match cmd {
                 TrayCommand::UpdateTooltip(text) => unsafe {
+                    if let Ok(mut guard) = CURRENT_TOOLTIP.lock() {
+                        *guard = Some(text.clone());
+                    }
                     let mut update_nid: NOTIFYICONDATAW = std::mem::zeroed();
                     update_nid.cbSize = std::mem::size_of::<NOTIFYICONDATAW>() as u32;
                     update_nid.hWnd = hwnd;
@@ -289,7 +310,24 @@ unsafe extern "system" fn tray_wnd_proc(
                     _ => 0,
                 }
             }
+            WM_TIMER if w_param == 1 => {
+                if add_or_refresh_tray_icon(hwnd) {
+                    info!("System tray notification icon attached successfully after retry.");
+                    KillTimer(hwnd, 1);
+                }
+                0
+            }
+            msg if msg == WM_TASKBAR_CREATED.load(Ordering::Relaxed) && msg != 0 => {
+                if add_or_refresh_tray_icon(hwnd) {
+                    info!("Taskbar created or restarted; system tray notification icon reattached.");
+                    KillTimer(hwnd, 1);
+                } else {
+                    SetTimer(hwnd, 1, 1000, None);
+                }
+                0
+            }
             WM_DESTROY => {
+                KillTimer(hwnd, 1);
                 PostQuitMessage(0);
                 0
             }
