@@ -4,7 +4,7 @@
 //! API key validity, and Windows native hook readiness.
 
 use crate::config::AppConfig;
-use cpal::traits::{DeviceTrait, HostTrait};
+use crate::core::audio::AudioCaptureEngine;
 use std::time::Instant;
 
 pub struct DoctorReport {
@@ -33,28 +33,31 @@ impl SystemDoctor {
         // 1. Audio Input Diagnostics (cpal)
         print!("[1/4] Checking Audio Input Hardware (WASAPI)... ");
         let host = cpal::default_host();
-        let (mic_detected, mic_name, mic_sample_rate) = match host.default_input_device() {
-            Some(device) => {
-                let name = device
-                    .name()
-                    .unwrap_or_else(|_| "Unknown Device".to_string());
-                let sample_rate = match device.default_input_config() {
-                    Ok(cfg) => cfg.sample_rate().0,
-                    Err(_) => 48000,
-                };
-                println!("OK");
-                println!("      Device: {}", name);
-                println!(
-                    "      Native Sample Rate: {} Hz (resampler target: 16,000 Hz)",
-                    sample_rate
-                );
-                (true, name, sample_rate)
-            }
-            None => {
-                println!("FAILED (No default recording device found)");
-                (false, "None".to_string(), 0)
-            }
-        };
+        let (mic_detected, mic_name, mic_sample_rate) =
+            match AudioCaptureEngine::resolve_best_device(
+                &host,
+                config.audio_device_id.as_deref(),
+                config.prefer_external_mic,
+            ) {
+                Ok((_, cfg, name, is_ext)) => {
+                    println!("OK");
+                    let tag = if is_ext {
+                        " [EXTERNAL EARPHONES/HEADSET ACTIVE]"
+                    } else {
+                        " (Smart Auto-Detection will switch to earphones when plugged in)"
+                    };
+                    println!("      Selected Device   : {}{}", name, tag);
+                    println!(
+                        "      Native Sample Rate: {} Hz (resampler target: 16,000 Hz)",
+                        cfg.sample_rate().0
+                    );
+                    (true, name, cfg.sample_rate().0)
+                }
+                Err(_) => {
+                    println!("FAILED (No default recording device found)");
+                    (false, "None".to_string(), 0)
+                }
+            };
 
         // 2. Configuration & Credentials Check
         print!("[2/4] Checking Configuration & API Credentials... ");

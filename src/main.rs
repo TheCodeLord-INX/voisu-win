@@ -93,10 +93,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             println!("Interaction   : {:?}", config.interaction_mode);
             println!("Delivery Mode : {:?}", config.delivery_mode);
 
-            let audio_engine = match AudioCaptureEngine::new() {
+            let audio_engine = match AudioCaptureEngine::with_config(&config) {
                 Ok(engine) => {
+                    let ext_badge = if engine.is_external() {
+                        " [EXTERNAL EARPHONES/MIC]"
+                    } else {
+                        " [Smart Auto-Detect Active]"
+                    };
                     println!(
-                        "Audio Input   : OK (Native: {} Hz, {} ch)",
+                        "Audio Input   : OK ('{}'{}, Native: {} Hz, {} ch)",
+                        engine.device_name(),
+                        ext_badge,
                         engine.sample_rate(),
                         engine.channels()
                     );

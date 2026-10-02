@@ -11,7 +11,7 @@ use rubato::{
     Resampler, SincFixedIn, SincInterpolationParameters, SincInterpolationType, WindowFunction,
 };
 use std::io::Cursor;
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 use std::time::Instant;
 use thiserror::Error;
 use tokio::sync::mpsc;
@@ -239,47 +239,274 @@ impl RecordingSession {
     }
 }
 
-/// Core WASAPI audio capture engine.
-pub struct AudioCaptureEngine {
-    device: Device,
+/// Keywords commonly present in external headsets, earphones, and USB/Bluetooth microphones.
+pub const EXTERNAL_DEVICE_KEYWORDS: &[&str] = &[
+    "headset",
+    "earphone",
+    "earphones",
+    "headphone",
+    "headphones",
+    "earbud",
+    "earbuds",
+    "airpod",
+    "airpods",
+    "galaxy buds",
+    "pixel buds",
+    "usb",
+    "bluetooth",
+    "wireless",
+    "external",
+    "mic in",
+    "line in",
+    "front mic",
+    "jack",
+    "3.5mm",
+    "hands-free",
+    "handsfree",
+    "bose",
+    "sony",
+    "jabra",
+    "sennheiser",
+    "hyperx",
+    "corsair",
+    "razer",
+    "steelseries",
+    "blue yeti",
+    "rode",
+    "shure",
+    "fifine",
+    "elgato",
+    "samson",
+    "focusrite",
+];
+
+/// Keywords indicative of built-in laptop microphones.
+pub const BUILTIN_DEVICE_KEYWORDS: &[&str] = &[
+    "array",
+    "internal",
+    "integrated",
+    "built-in",
+    "builtin",
+    "intel(r) smart sound",
+    "intel® smart sound",
+];
+
+/// Scores an audio device name to determine priority.
+/// External earphones and headsets rank highest (100 or 90).
+/// Built-in microphones rank lower (50 or 10).
+pub fn score_audio_device(name: &str, is_default: bool) -> (u32, bool) {
+    let lower = name.to_lowercase();
+    let is_external = EXTERNAL_DEVICE_KEYWORDS.iter().any(|&k| lower.contains(k));
+    let is_builtin = BUILTIN_DEVICE_KEYWORDS.iter().any(|&k| lower.contains(k));
+
+    let score = if is_external {
+        if is_default {
+            100 // External device AND marked as Windows default
+        } else {
+            90 // External device plugged in (even if Windows didn't auto-switch default)
+        }
+    } else if is_default && !is_builtin {
+        70 // Default device that isn't explicitly an internal mic array
+    } else if is_default {
+        50 // System default internal microphone array
+    } else if !is_builtin {
+        30 // Other available device
+    } else {
+        10 // Non-default internal device
+    };
+
+    (score, is_external)
+}
+
+struct ActiveDeviceState {
+    name: String,
+    device: Arc<Device>,
     config: SupportedStreamConfig,
+    is_external: bool,
+}
+
+/// Core WASAPI audio capture engine with smart device selection and dynamic hot-plug detection.
+pub struct AudioCaptureEngine {
+    state: RwLock<ActiveDeviceState>,
+    prefer_external_mic: bool,
+    device_id_override: Option<String>,
 }
 
 impl AudioCaptureEngine {
-    /// Initialize audio engine using system default input device.
+    /// Resolves the optimal input device according to smart priority and configuration.
+    pub fn resolve_best_device(
+        host: &cpal::Host,
+        device_override: Option<&str>,
+        prefer_external: bool,
+    ) -> Result<(Device, SupportedStreamConfig, String, bool), AudioError> {
+        let default_device = host.default_input_device();
+        let default_name = default_device
+            .as_ref()
+            .and_then(|d| d.name().ok())
+            .unwrap_or_default();
+
+        // 1. If explicit device override is provided, search for match
+        if let Some(target) = device_override.filter(|t| !t.trim().is_empty()) {
+            let target_lower = target.trim().to_lowercase();
+            if let Ok(devices) = host.input_devices() {
+                for dev in devices {
+                    let Ok(name) = dev.name() else { continue };
+                    if !name.to_lowercase().contains(&target_lower) {
+                        continue;
+                    }
+                    if let Ok(cfg) = dev.default_input_config() {
+                        let (_, is_ext) = score_audio_device(&name, name == default_name);
+                        return Ok((dev, cfg, name, is_ext));
+                    }
+                }
+            }
+        }
+
+        // 2. If smart external prioritization is enabled, score all enumerated devices
+        if prefer_external && let Ok(devices) = host.input_devices() {
+            let mut candidates = Vec::new();
+            for dev in devices {
+                let Ok(name) = dev.name() else { continue };
+                let is_def = name == default_name;
+                let (score, is_ext) = score_audio_device(&name, is_def);
+                candidates.push((score, is_ext, name, dev));
+            }
+
+            // Sort descending by score
+            candidates.sort_by_key(|c| std::cmp::Reverse(c.0));
+
+            for (score, is_ext, name, dev) in candidates {
+                if let Ok(cfg) = dev.default_input_config() {
+                    debug!(
+                        "Evaluated audio candidate: '{}' (score: {}, external: {})",
+                        name, score, is_ext
+                    );
+                    return Ok((dev, cfg, name, is_ext));
+                }
+            }
+        }
+
+        // 3. Fall back to system default input device
+        let dev = default_device.ok_or(AudioError::NoInputDevice)?;
+        let name = dev.name().unwrap_or_else(|_| "Default Device".to_string());
+        let cfg = dev.default_input_config()?;
+        let (_, is_ext) = score_audio_device(&name, true);
+        Ok((dev, cfg, name, is_ext))
+    }
+
+    /// Initialize audio engine using smart device detection (prioritizing external earphones/microphones).
     pub fn new() -> Result<Self, AudioError> {
+        Self::with_options(None, true)
+    }
+
+    /// Initialize audio engine with user preferences from AppConfig.
+    pub fn with_config(config: &crate::config::AppConfig) -> Result<Self, AudioError> {
+        Self::with_options(
+            config.audio_device_id.as_deref(),
+            config.prefer_external_mic,
+        )
+    }
+
+    /// Initialize audio engine with specific override and smart prioritization options.
+    pub fn with_options(
+        device_id_override: Option<&str>,
+        prefer_external_mic: bool,
+    ) -> Result<Self, AudioError> {
         let host = cpal::default_host();
-        let device = host
-            .default_input_device()
-            .ok_or(AudioError::NoInputDevice)?;
-        let config = device.default_input_config()?;
+        let (device, config, name, is_external) =
+            Self::resolve_best_device(&host, device_id_override, prefer_external_mic)?;
+
         info!(
-            "Audio engine initialized with device: '{}', native sample rate: {} Hz, channels: {}",
-            device.name().unwrap_or_else(|_| "Default".to_string()),
+            "Audio engine initialized with device: '{}' (external: {}), native sample rate: {} Hz, channels: {}",
+            name,
+            is_external,
             config.sample_rate().0,
             config.channels()
         );
-        Ok(Self { device, config })
+
+        Ok(Self {
+            state: RwLock::new(ActiveDeviceState {
+                name,
+                device: Arc::new(device),
+                config,
+                is_external,
+            }),
+            prefer_external_mic,
+            device_id_override: device_id_override.map(|s| s.to_string()),
+        })
+    }
+
+    pub fn device_name(&self) -> String {
+        self.state.read().unwrap().name.clone()
+    }
+
+    pub fn is_external(&self) -> bool {
+        self.state.read().unwrap().is_external
     }
 
     pub fn sample_rate(&self) -> u32 {
-        self.config.sample_rate().0
+        self.state.read().unwrap().config.sample_rate().0
     }
 
     pub fn channels(&self) -> u16 {
-        self.config.channels()
+        self.state.read().unwrap().config.channels()
     }
 
     /// Begin a recording session, emitting real-time 16kHz `AudioFrame` chunks to the returned channel.
+    /// Dynamically re-evaluates input devices: if earphones or an external mic was recently plugged in
+    /// or unplugged, switches to the optimal device seamlessly without restarting the application.
     pub fn start_session(
         &self,
     ) -> Result<(mpsc::Receiver<AudioFrame>, RecordingSession), AudioError> {
+        // Dynamic re-evaluation of audio topology on each session start
+        if self.prefer_external_mic {
+            let host = cpal::default_host();
+            if let Ok((new_dev, new_cfg, new_name, is_ext)) =
+                Self::resolve_best_device(&host, self.device_id_override.as_deref(), true)
+            {
+                let mut guard = self.state.write().unwrap();
+                if guard.name != new_name {
+                    if is_ext {
+                        info!(
+                            "Smart Audio: External microphone detected ('{}'). Switching active input.",
+                            new_name
+                        );
+                        println!(
+                            "\n[AUDIO] External microphone detected: '{}' (Active)",
+                            new_name
+                        );
+                    } else if guard.is_external {
+                        info!(
+                            "Smart Audio: External microphone unplugged. Reverting to ('{}').",
+                            new_name
+                        );
+                        println!(
+                            "\n[AUDIO] External mic unplugged, reverted to: '{}'",
+                            new_name
+                        );
+                    }
+                    guard.name = new_name;
+                    guard.device = Arc::new(new_dev);
+                    guard.config = new_cfg;
+                    guard.is_external = is_ext;
+                }
+            }
+        }
+
+        let (device, channels, native_rate, sample_format, stream_config) = {
+            let guard = self.state.read().unwrap();
+            let cfg: StreamConfig = guard.config.clone().into();
+            (
+                Arc::clone(&guard.device),
+                guard.config.channels() as usize,
+                guard.config.sample_rate().0,
+                guard.config.sample_format(),
+                cfg,
+            )
+        };
+
         let (tx, rx) = mpsc::channel::<AudioFrame>(100);
         let sample_accumulator = Arc::new(std::sync::Mutex::new(Vec::new()));
-
-        let channels = self.config.channels() as usize;
-        let native_rate = self.config.sample_rate().0;
-        let sample_format = self.config.sample_format();
 
         let acc = Arc::clone(&sample_accumulator);
         let start_time = Instant::now();
@@ -350,10 +577,8 @@ impl AudioCaptureEngine {
             error!("WASAPI stream error: {}", err);
         };
 
-        let stream_config: StreamConfig = self.config.clone().into();
-
         let stream = match sample_format {
-            SampleFormat::F32 => self.device.build_input_stream(
+            SampleFormat::F32 => device.build_input_stream(
                 &stream_config,
                 move |data: &[f32], _: &cpal::InputCallbackInfo| {
                     let mono = downmix_to_mono(data, channels);
@@ -362,7 +587,7 @@ impl AudioCaptureEngine {
                 err_fn,
                 None,
             )?,
-            SampleFormat::I16 => self.device.build_input_stream(
+            SampleFormat::I16 => device.build_input_stream(
                 &stream_config,
                 move |data: &[i16], _: &cpal::InputCallbackInfo| {
                     let float_data: Vec<f32> = data.iter().map(|&s| s as f32 / 32768.0).collect();
@@ -372,7 +597,7 @@ impl AudioCaptureEngine {
                 err_fn,
                 None,
             )?,
-            SampleFormat::U16 => self.device.build_input_stream(
+            SampleFormat::U16 => device.build_input_stream(
                 &stream_config,
                 move |data: &[u16], _: &cpal::InputCallbackInfo| {
                     let float_data: Vec<f32> = data
@@ -465,5 +690,52 @@ mod tests {
             output_16k.len(),
             diff
         );
+    }
+
+    #[test]
+    fn test_score_audio_device_earphones_and_headsets() {
+        let (score1, is_ext1) = score_audio_device("Headset Microphone (Realtek Audio)", true);
+        assert_eq!(score1, 100);
+        assert!(is_ext1);
+
+        let (score2, is_ext2) = score_audio_device("USB Audio Device", false);
+        assert_eq!(score2, 90);
+        assert!(is_ext2);
+
+        let (score3, is_ext3) = score_audio_device("AirPods Hands-Free AG Audio", false);
+        assert_eq!(score3, 90);
+        assert!(is_ext3);
+
+        let (score4, is_ext4) = score_audio_device("Sony WH-1000XM4 Hands-Free AG Audio", false);
+        assert_eq!(score4, 90);
+        assert!(is_ext4);
+    }
+
+    #[test]
+    fn test_score_audio_device_builtin_array() {
+        let (score1, is_ext1) = score_audio_device(
+            "Microphone Array (2- Intel® Smart Sound Technology for Digital Microphones)",
+            true,
+        );
+        assert_eq!(score1, 50);
+        assert!(!is_ext1);
+
+        let (score2, is_ext2) = score_audio_device("Internal Microphone", false);
+        assert_eq!(score2, 10);
+        assert!(!is_ext2);
+    }
+
+    #[test]
+    fn test_score_audio_device_ranking_priority() {
+        let (score_ext_def, _) = score_audio_device("Headset Microphone", true);
+        let (score_ext_non_def, _) = score_audio_device("Headset Microphone", false);
+        let (score_generic_def, _) = score_audio_device("Line In Audio", true);
+        let (score_builtin_def, _) = score_audio_device("Microphone Array", true);
+        let (score_builtin_non_def, _) = score_audio_device("Microphone Array", false);
+
+        assert!(score_ext_def > score_ext_non_def);
+        assert!(score_ext_non_def > score_builtin_def);
+        assert!(score_generic_def > score_builtin_def);
+        assert!(score_builtin_def > score_builtin_non_def);
     }
 }

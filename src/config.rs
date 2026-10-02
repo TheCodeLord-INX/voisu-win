@@ -50,6 +50,10 @@ pub struct AppConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub native_sample_rate: Option<u32>,
 
+    /// Automatically prioritize external microphones (earphones, headsets, USB/BT mics) when plugged in.
+    #[serde(default = "default_prefer_external_mic")]
+    pub prefer_external_mic: bool,
+
     /// Maximum wait time (ms) for target app to consume clipboard before restoring prior content.
     #[serde(default = "default_clipboard_restore_timeout")]
     pub clipboard_restore_timeout_ms: u32,
@@ -57,6 +61,10 @@ pub struct AppConfig {
     /// Custom domain terms, acronyms, or proper nouns.
     #[serde(default)]
     pub custom_dictionary: Vec<String>,
+}
+
+fn default_prefer_external_mic() -> bool {
+    true
 }
 
 fn default_clipboard_restore_timeout() -> u32 {
@@ -74,6 +82,7 @@ impl Default for AppConfig {
             dpr_policy: DprPolicy::default(),
             audio_device_id: None,
             native_sample_rate: None,
+            prefer_external_mic: true,
             clipboard_restore_timeout_ms: DEFAULT_CLIPBOARD_RESTORE_TIMEOUT_MS,
             custom_dictionary: Vec::new(),
         }
@@ -260,6 +269,7 @@ mod tests {
             dpr_policy: DprPolicy::Adaptive,
             audio_device_id: None,
             native_sample_rate: Some(48000),
+            prefer_external_mic: true,
             clipboard_restore_timeout_ms: 250,
             custom_dictionary: vec!["Kubernetes".to_string(), "gRPC".to_string()],
         };
