@@ -1,0 +1,11 @@
+# Rust target directory
+/target/
+
+# Local sensitive configuration / keys
+config.json
+.voisu/
+*.key
+
+# IDE & OS files
+.DS_Store
+Thumbs.db
