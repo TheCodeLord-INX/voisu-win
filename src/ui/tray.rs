@@ -20,9 +20,10 @@ use windows_sys::Win32::UI::Shell::{
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     AppendMenuW, CreatePopupMenu, CreateWindowExW, DefWindowProcW, DestroyMenu, DestroyWindow,
     DispatchMessageW, GetCursorPos, GetMessageW, HICON, HMENU, IDI_APPLICATION, LoadIconW,
-    MF_DISABLED, MF_GRAYED, MF_SEPARATOR, MF_STRING, MSG, PostQuitMessage, RegisterClassW,
-    SetForegroundWindow, TPM_BOTTOMALIGN, TPM_RETURNCMD, TPM_RIGHTBUTTON, TrackPopupMenu,
-    WM_DESTROY, WM_LBUTTONDBLCLK, WM_RBUTTONUP, WM_USER, WNDCLASSW, WS_OVERLAPPED,
+    MF_CHECKED, MF_DISABLED, MF_GRAYED, MF_SEPARATOR, MF_STRING, MF_UNCHECKED, MSG,
+    PostQuitMessage, RegisterClassW, SetForegroundWindow, TPM_BOTTOMALIGN, TPM_RETURNCMD,
+    TPM_RIGHTBUTTON, TrackPopupMenu, WM_DESTROY, WM_LBUTTONDBLCLK, WM_RBUTTONUP, WM_USER,
+    WNDCLASSW, WS_OVERLAPPED,
 };
 
 const WM_TRAYICON: u32 = WM_USER + 101;
@@ -30,12 +31,16 @@ const TRAY_ICON_ID: u32 = 1;
 
 // Menu Command IDs
 const CMD_TITLE: usize = 0;
-const CMD_DOCTOR: usize = 101;
-const CMD_CONFIG: usize = 102;
-const CMD_EXIT: usize = 103;
+const CMD_AUTOSTART: usize = 100;
+const CMD_TOGGLE_CONSOLE: usize = 101;
+const CMD_DOCTOR: usize = 102;
+const CMD_CONFIG: usize = 103;
+const CMD_EXIT: usize = 104;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TrayEvent {
+    ToggleAutostart,
+    ToggleConsole,
     RunDoctor,
     OpenConfig,
     Exit,
@@ -304,6 +309,28 @@ fn show_context_menu(hwnd: HWND) {
         );
         AppendMenuW(menu, MF_SEPARATOR, 0, null_mut());
 
+        // Autostart toggle with live checkmark
+        let autostart_enabled = crate::platform::autostart::is_autostart_enabled();
+        let autostart_flags = if autostart_enabled {
+            MF_STRING | MF_CHECKED
+        } else {
+            MF_STRING | MF_UNCHECKED
+        };
+        append_item(
+            menu,
+            CMD_AUTOSTART,
+            "&Start with Windows",
+            autostart_flags,
+        );
+
+        append_item(
+            menu,
+            CMD_TOGGLE_CONSOLE,
+            "Show / Hide &Console Window",
+            MF_STRING,
+        );
+        AppendMenuW(menu, MF_SEPARATOR, 0, null_mut());
+
         // Action items
         append_item(
             menu,
@@ -339,6 +366,12 @@ fn show_context_menu(hwnd: HWND) {
         && let Some(tx) = EVENT_SENDER.lock().ok().and_then(|g| g.clone())
     {
         match cmd as usize {
+            CMD_AUTOSTART => {
+                let _ = tx.send(TrayEvent::ToggleAutostart);
+            }
+            CMD_TOGGLE_CONSOLE => {
+                let _ = tx.send(TrayEvent::ToggleConsole);
+            }
             CMD_DOCTOR => {
                 let _ = tx.send(TrayEvent::RunDoctor);
             }

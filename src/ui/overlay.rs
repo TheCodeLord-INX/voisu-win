@@ -1,9 +1,9 @@
-//! Win32 layered acrylic floating pill overlay (`ui::overlay`).
+//! Win32 layered Neo-Brutalist floating pill overlay (`ui::overlay`).
 //!
-//! Renders a non-activating, click-through, floating capsule window positioned bottom-center.
-//! Uses Windows 11 DWM transient acrylic backdrop (`DWMSBT_TRANSIENTWINDOW`) with Windows 10
-//! layered alpha fallback. Displays live reactive RMS audio meters during recording and
-//! state transitions for processing and delivery.
+//! Renders a non-activating, click-through, floating pill window positioned bottom-center.
+//! Uses Neo-Brutalist design: bold solid colors, thick black borders, hard drop-shadows,
+//! chunky typography. Color-key transparency (magenta) enables the hard shadow effect.
+//! Displays live reactive RMS audio meters during recording and state transitions.
 
 use std::ffi::OsStr;
 use std::os::windows::ffi::OsStrExt;
@@ -13,39 +13,47 @@ use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::mpsc as std_mpsc;
 use tracing::warn;
 use windows_sys::Win32::Foundation::{COLORREF, HWND, LPARAM, LRESULT, RECT, WPARAM};
-use windows_sys::Win32::Graphics::Dwm::DwmSetWindowAttribute;
 use windows_sys::Win32::Graphics::Gdi::{
     BeginPaint, BitBlt, CLEARTYPE_QUALITY, CLIP_DEFAULT_PRECIS, CreateCompatibleBitmap,
-    CreateCompatibleDC, CreateFontW, CreatePen, CreateRoundRectRgn, CreateSolidBrush,
+    CreateCompatibleDC, CreateFontW, CreatePen, CreateSolidBrush,
     DEFAULT_CHARSET, DT_CENTER, DT_SINGLELINE, DT_VCENTER, DeleteDC, DeleteObject, DrawTextW,
-    Ellipse, EndPaint, FW_SEMIBOLD, GetStockObject, HDC, InvalidateRect, NULL_BRUSH,
+    EndPaint, FillRect, FW_BOLD, FW_SEMIBOLD, HDC, InvalidateRect,
     OUT_DEFAULT_PRECIS, PAINTSTRUCT, PS_SOLID, RoundRect, SRCCOPY, SelectObject, SetBkMode,
-    SetTextColor, SetWindowRgn, TRANSPARENT, UpdateWindow,
+    SetTextColor, TRANSPARENT, UpdateWindow,
 };
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     CS_HREDRAW, CS_VREDRAW, CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW,
-    GetMessageW, GetSystemMetrics, HMENU, KillTimer, LWA_ALPHA, MSG, RegisterClassW, SM_CXSCREEN,
+    GetMessageW, GetSystemMetrics, HMENU, KillTimer, MSG, RegisterClassW, SM_CXSCREEN,
     SM_CYSCREEN, SW_HIDE, SW_SHOWNOACTIVATE, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE,
     SWP_SHOWWINDOW, SetLayeredWindowAttributes, SetTimer, SetWindowPos, ShowWindow, WM_TIMER,
     WNDCLASSW, WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_EX_TRANSPARENT,
     WS_POPUP,
 };
 
-// Dimensions derived from StitchMCP Obsidian Flow design
-pub const OVERLAY_WIDTH: i32 = 290;
-pub const OVERLAY_HEIGHT: i32 = 44;
-pub const OVERLAY_CORNER_RADIUS: i32 = 44; // Full capsule semicircular caps
+// Neo-Brutalist Pill Dimensions
+// Main pill: 280 x 48, hard shadow offset 5px right + 5px down
+// Total window canvas includes shadow space
+pub const PILL_WIDTH: i32 = 280;
+pub const PILL_HEIGHT: i32 = 48;
+const SHADOW_OFFSET: i32 = 5;
+pub const OVERLAY_WIDTH: i32 = PILL_WIDTH + SHADOW_OFFSET;
+pub const OVERLAY_HEIGHT: i32 = PILL_HEIGHT + SHADOW_OFFSET;
+pub const OVERLAY_CORNER_RADIUS: i32 = 14; // Slight rounding, not full capsule
 pub const OVERLAY_BOTTOM_MARGIN: i32 = 90;
+
+// Neo-Brutalist color keying: magenta = transparent
+const COLORKEY_R: u8 = 255;
+const COLORKEY_G: u8 = 0;
+const COLORKEY_B: u8 = 255;
+
+// LWA_COLORKEY flag for SetLayeredWindowAttributes
+const LWA_COLORKEY: u32 = 0x00000001;
 
 // Animation tick counter (driven by 40 FPS Win32 timer)
 static ANIM_TICK: AtomicU32 = AtomicU32::new(0);
 
-// DWM Windows 11 attributes
-pub const DWMWA_USE_IMMERSIVE_DARK_MODE: u32 = 20;
-pub const DWMWA_WINDOW_CORNER_PREFERENCE: u32 = 33;
-pub const DWMWCP_ROUND: u32 = 2;
-pub const DWMWA_SYSTEMBACKDROP_TYPE: u32 = 38;
-pub const DWMSBT_TRANSIENTWINDOW: u32 = 3; // Transient Acrylic
+// Smoothed activity envelope (stored as f32 bits in AtomicU32 for ballistics)
+static SMOOTHED_ACTIVITY: AtomicU32 = AtomicU32::new(0);
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum OverlayState {
@@ -190,36 +198,14 @@ fn run_overlay_window_thread(
             return;
         }
 
-        // 1. Create rounded capsule window region
-        let rgn = CreateRoundRectRgn(
-            0,
-            0,
-            OVERLAY_WIDTH + 1,
-            OVERLAY_HEIGHT + 1,
-            OVERLAY_CORNER_RADIUS,
-            OVERLAY_CORNER_RADIUS,
-        );
-        SetWindowRgn(hwnd, rgn, 1);
-
-        // 2. Modern DWM Acrylic styling for Windows 11
-        let dark_mode = 1u32;
-        let _ = DwmSetWindowAttribute(
+        // Neo-Brutalist: Use color-key transparency so magenta pixels become invisible.
+        // This lets the hard black shadow float over the desktop.
+        SetLayeredWindowAttributes(
             hwnd,
-            DWMWA_USE_IMMERSIVE_DARK_MODE,
-            &dark_mode as *const _ as _,
-            std::mem::size_of::<u32>() as u32,
+            rgb(COLORKEY_R, COLORKEY_G, COLORKEY_B),
+            0,
+            LWA_COLORKEY,
         );
-
-        let backdrop_type = DWMSBT_TRANSIENTWINDOW;
-        let _ = DwmSetWindowAttribute(
-            hwnd,
-            DWMWA_SYSTEMBACKDROP_TYPE,
-            &backdrop_type as *const _ as _,
-            std::mem::size_of::<u32>() as u32,
-        );
-
-        // 3. Fallback alpha transparency for Windows 10
-        SetLayeredWindowAttributes(hwnd, 0, 245, LWA_ALPHA);
 
         // 4. Start 40 FPS animation timer (25ms interval)
         SetTimer(hwnd, 1, 25, None);
@@ -325,474 +311,254 @@ fn paint_overlay(_hwnd: HWND, hdc: HDC) {
     let tick = ANIM_TICK.load(Ordering::Relaxed);
 
     unsafe {
-        // Double buffering: Create compatible DC and memory bitmap for flicker-free rendering
+        // Double buffering for flicker-free Neo-Brutalist rendering
         let mem_dc = CreateCompatibleDC(hdc);
         let mem_bmp = CreateCompatibleBitmap(hdc, OVERLAY_WIDTH, OVERLAY_HEIGHT);
         let old_bmp = SelectObject(mem_dc, mem_bmp as _);
 
-        // 1. Draw outer capsule background & specular glow border
-        let (border_color, base_bg) = match state {
-            OverlayState::Recording { .. } => (rgb(0, 240, 255), rgb(15, 17, 23)), // Electric Cyan rim + Obsidian Glass
-            OverlayState::Processing => (rgb(168, 85, 247), rgb(15, 17, 23)), // Neon Violet rim + Obsidian Glass
-            OverlayState::Done => (rgb(16, 185, 129), rgb(15, 17, 23)), // Matrix Emerald rim + Obsidian Glass
-            OverlayState::Hidden => (rgb(40, 44, 56), rgb(15, 17, 23)),
+        // Fill entire canvas with magenta (color-key = transparent)
+        let key_brush = CreateSolidBrush(rgb(COLORKEY_R, COLORKEY_G, COLORKEY_B));
+        let canvas = RECT { left: 0, top: 0, right: OVERLAY_WIDTH, bottom: OVERLAY_HEIGHT };
+        FillRect(mem_dc, &canvas, key_brush);
+        DeleteObject(key_brush as _);
+
+        // --- Neo-Brutalist palette per state ---
+        let (pill_bg, pill_text_color, accent_color, label, chip_label) = match state {
+            OverlayState::Recording { .. } => (
+                rgb(255, 229, 0),   // Electric Yellow
+                rgb(0, 0, 0),       // Black text
+                rgb(0, 0, 0),       // Black bars
+                "LISTENING",
+                "F8 STOP",
+            ),
+            OverlayState::Processing => (
+                rgb(255, 51, 102),  // Hot Pink
+                rgb(255, 255, 255), // White text
+                rgb(0, 0, 0),       // Black bars
+                "PROCESSING",
+                "DUAL LPU",
+            ),
+            OverlayState::Done => (
+                rgb(170, 255, 0),   // Acid Lime
+                rgb(0, 0, 0),       // Black text
+                rgb(0, 0, 0),       // Black bars
+                "DELIVERED",
+                "PASTED",
+            ),
+            OverlayState::Hidden => return,
         };
 
-        let pen = CreatePen(PS_SOLID, 1, border_color);
-        let brush = CreateSolidBrush(base_bg);
-        let old_pen = SelectObject(mem_dc, pen as _);
-        let old_brush = SelectObject(mem_dc, brush as _);
-
+        // 1. Hard drop-shadow (solid black, offset right+down)
+        let shadow_brush = CreateSolidBrush(rgb(0, 0, 0));
+        let shadow_pen = CreatePen(PS_SOLID, 1, rgb(0, 0, 0));
+        let old_p = SelectObject(mem_dc, shadow_pen as _);
+        let old_b = SelectObject(mem_dc, shadow_brush as _);
         RoundRect(
             mem_dc,
-            0,
-            0,
-            OVERLAY_WIDTH,
-            OVERLAY_HEIGHT,
-            OVERLAY_CORNER_RADIUS,
-            OVERLAY_CORNER_RADIUS,
+            SHADOW_OFFSET, SHADOW_OFFSET,
+            SHADOW_OFFSET + PILL_WIDTH, SHADOW_OFFSET + PILL_HEIGHT,
+            OVERLAY_CORNER_RADIUS, OVERLAY_CORNER_RADIUS,
         );
+        SelectObject(mem_dc, old_p);
+        SelectObject(mem_dc, old_b);
+        DeleteObject(shadow_brush as _);
+        DeleteObject(shadow_pen as _);
 
-        SelectObject(mem_dc, old_pen);
-        SelectObject(mem_dc, old_brush);
-        DeleteObject(pen as _);
-        DeleteObject(brush as _);
+        // 2. Main pill body (bold color fill + thick 3px black border)
+        let body_brush = CreateSolidBrush(pill_bg);
+        let body_pen = CreatePen(PS_SOLID, 3, rgb(0, 0, 0));
+        let old_p = SelectObject(mem_dc, body_pen as _);
+        let old_b = SelectObject(mem_dc, body_brush as _);
+        RoundRect(
+            mem_dc,
+            0, 0,
+            PILL_WIDTH, PILL_HEIGHT,
+            OVERLAY_CORNER_RADIUS, OVERLAY_CORNER_RADIUS,
+        );
+        SelectObject(mem_dc, old_p);
+        SelectObject(mem_dc, old_b);
+        DeleteObject(body_brush as _);
+        DeleteObject(body_pen as _);
 
         SetBkMode(mem_dc, TRANSPARENT as _);
 
+        // Font setup (chunky, bold)
         let font_name: Vec<u16> = OsStr::new("Segoe UI")
             .encode_wide()
             .chain(std::iter::once(0))
             .collect();
 
+        // Helper: draw bold label text
+        let draw_label = |dc: HDC, text: &str, rect: RECT, color: COLORREF| {
+            let hfont = CreateFontW(
+                -14, 0, 0, 0, FW_BOLD as i32, 0, 0, 0,
+                DEFAULT_CHARSET as u32, OUT_DEFAULT_PRECIS as u32, CLIP_DEFAULT_PRECIS as u32,
+                CLEARTYPE_QUALITY as u32, 0, font_name.as_ptr(),
+            );
+            let old_f = SelectObject(dc, hfont as _);
+            SetTextColor(dc, color);
+            let wtext: Vec<u16> = OsStr::new(text).encode_wide().chain(std::iter::once(0)).collect();
+            let mut r = rect;
+            DrawTextW(dc, wtext.as_ptr(), wtext.len() as i32 - 1, &mut r, DT_CENTER | DT_SINGLELINE | DT_VCENTER);
+            SelectObject(dc, old_f);
+            DeleteObject(hfont as _);
+        };
+
+        // Helper: draw chip text (smaller)
+        let draw_chip_text = |dc: HDC, text: &str, rect: RECT, color: COLORREF| {
+            let hfont = CreateFontW(
+                -10, 0, 0, 0, FW_SEMIBOLD as i32, 0, 0, 0,
+                DEFAULT_CHARSET as u32, OUT_DEFAULT_PRECIS as u32, CLIP_DEFAULT_PRECIS as u32,
+                CLEARTYPE_QUALITY as u32, 0, font_name.as_ptr(),
+            );
+            let old_f = SelectObject(dc, hfont as _);
+            SetTextColor(dc, color);
+            let wtext: Vec<u16> = OsStr::new(text).encode_wide().chain(std::iter::once(0)).collect();
+            let mut r = rect;
+            DrawTextW(dc, wtext.as_ptr(), wtext.len() as i32 - 1, &mut r, DT_CENTER | DT_SINGLELINE | DT_VCENTER);
+            SelectObject(dc, old_f);
+            DeleteObject(hfont as _);
+        };
+
+        // 3. State label (left side of pill)
+        draw_label(
+            mem_dc, label,
+            RECT { left: 16, top: 0, right: 120, bottom: PILL_HEIGHT },
+            pill_text_color,
+        );
+
+        // 4. Equalizer bars (center of pill)
         match state {
-            OverlayState::Hidden => {}
             OverlayState::Recording { rms } => {
-                // A. Animated Pulsating Ruby Radar Dot
-                let cycle = ((tick % 36) as f32) / 36.0;
-                let radar_r = 5.0 + cycle * 9.0;
-                let radar_r_int = radar_r as i32;
+                let active_level = (rms - 0.0012).max(0.0);
+                // Compressive power curve: whisper / low pitch jumps up to 0.4-0.6, normal voice to 0.8-1.0
+                let target_activity = (active_level * 50.0).clamp(0.0, 1.0).powf(0.45);
 
-                let null_brush = GetStockObject(NULL_BRUSH as _);
-                let radar_pen = CreatePen(PS_SOLID, 1, rgb(180, 30, 55));
-                let old_p = SelectObject(mem_dc, radar_pen as _);
-                let old_b = SelectObject(mem_dc, null_brush);
-                Ellipse(
-                    mem_dc,
-                    20 - radar_r_int,
-                    22 - radar_r_int,
-                    20 + radar_r_int,
-                    22 + radar_r_int,
-                );
-                SelectObject(mem_dc, old_p);
-                SelectObject(mem_dc, old_b);
-                DeleteObject(radar_pen as _);
+                // Ballistics: fast attack (responsive jump), smooth musical decay (~150ms half-life)
+                let prev_activity = f32::from_bits(SMOOTHED_ACTIVITY.load(Ordering::Relaxed));
+                let activity = if target_activity > prev_activity {
+                    prev_activity + (target_activity - prev_activity) * 0.80
+                } else {
+                    (prev_activity * 0.88).max(0.0)
+                };
+                SMOOTHED_ACTIVITY.store(activity.to_bits(), Ordering::Relaxed);
 
-                // Breathing Ruby Core Dot
-                let breathe = (tick as f32 * 0.15).sin();
-                let core_r = if breathe > 0.0 { 4 } else { 3 };
-                let ruby_brush = CreateSolidBrush(rgb(255, 45, 85));
-                let ruby_pen = CreatePen(PS_SOLID, 1, rgb(255, 90, 120));
-                let old_p = SelectObject(mem_dc, ruby_pen as _);
-                let old_b = SelectObject(mem_dc, ruby_brush as _);
-                Ellipse(mem_dc, 20 - core_r, 22 - core_r, 20 + core_r, 22 + core_r);
-                SelectObject(mem_dc, old_p);
-                SelectObject(mem_dc, old_b);
-                DeleteObject(ruby_brush as _);
-                DeleteObject(ruby_pen as _);
-
-                // B. 9-Bar Reactive Neon Equalizer (Electric Cyan -> Neon Violet -> Hot Pink)
-                let bar_colors = [
-                    rgb(0, 240, 255),   // Electric Cyan
-                    rgb(34, 211, 238),  // Cyan
-                    rgb(56, 189, 248),  // Sky
-                    rgb(99, 102, 241),  // Indigo
-                    rgb(139, 92, 246),  // Violet
-                    rgb(168, 85, 247),  // Purple
-                    rgb(192, 132, 252), // Lavender
-                    rgb(232, 121, 249), // Fuchsia
-                    rgb(244, 63, 150),  // Hot Pink
-                ];
-
-                for (i, &bar_color) in bar_colors.iter().enumerate() {
+                let num_bars = 7;
+                for i in 0..num_bars {
                     let i_f = i as f32;
-                    let bell = 1.0 - ((i_f - 4.0).abs() / 5.0) * 0.35; // Center emphasis
-                    let wave1 = ((tick as f32 * 0.22) + (i_f * 0.70)).sin();
-                    let wave2 = ((tick as f32 * 0.14) - (i_f * 0.45)).cos() * 0.5;
-                    let wave_norm = (wave1 + wave2 + 1.5) / 3.0;
 
-                    let speech_boost = (rms * 2.8).clamp(0.0, 1.0);
-                    let amp = (speech_boost * 18.0 * bell) + (wave_norm * 5.0);
-                    let bar_h = (4.0 + amp).clamp(4.0, 26.0) as i32;
-                    let bx = 36 + (i as i32) * 7;
-                    let by = (OVERLAY_HEIGHT - bar_h) / 2;
+                    // Frequency weighting profile (bars 0..7 from lowest to highest frequency).
+                    // Substantially boost lower frequencies so deep tones and bass voice resonate high:
+                    let freq_weight = match i {
+                        0 => 1.45, // Sub-bass / chest resonance
+                        1 => 1.50, // Low bass
+                        2 => 1.35, // Low-mids
+                        3 => 1.20, // Mid body
+                        4 => 1.05, // Upper-mids
+                        5 => 0.90, // Presence
+                        _ => 0.80, // Treble
+                    };
 
-                    let bar_brush = CreateSolidBrush(bar_color);
-                    let bar_pen = CreatePen(PS_SOLID, 1, bar_color);
+                    let speed = 0.18;
+                    let t = tick as f32 * speed;
+                    let phase = i_f * 0.85;
+
+                    // Wave component 1: traveling sine wave
+                    let w1 = (t + phase).sin();
+                    // Wave component 2: counter-harmonic wave
+                    let w2 = (t * 0.65 - phase * 0.7 + (i_f * 1.3)).cos() * 0.5;
+                    // Lower-frequency rhythmic bass swell
+                    let low_freq_pulse = if i < 3 {
+                        (t * 0.35 + i_f * 0.4).sin().abs() * 0.35
+                    } else {
+                        0.0
+                    };
+
+                    let wave_motion = ((w1 + w2 + 1.5) / 3.0) + low_freq_pulse;
+
+                    // Max dynamic range of 32px (resting 4px -> active up to 36px tall)
+                    let max_dynamic = 32.0;
+                    let bar_amp = (activity * freq_weight * wave_motion * max_dynamic).clamp(0.0, max_dynamic);
+                    let bar_h = (4.0 + bar_amp) as i32;
+                    let bx = 128 + (i as i32) * 10;
+                    let by = (PILL_HEIGHT - bar_h) / 2;
+
+                    let bar_brush = CreateSolidBrush(accent_color);
+                    let bar_pen = CreatePen(PS_SOLID, 1, accent_color);
                     let old_p = SelectObject(mem_dc, bar_pen as _);
                     let old_b = SelectObject(mem_dc, bar_brush as _);
-                    RoundRect(mem_dc, bx, by, bx + 4, by + bar_h, 4, 4);
+                    RoundRect(mem_dc, bx, by, bx + 6, by + bar_h, 3, 3);
                     SelectObject(mem_dc, old_p);
                     SelectObject(mem_dc, old_b);
                     DeleteObject(bar_brush as _);
                     DeleteObject(bar_pen as _);
                 }
-
-                // C. Typography: "LISTENING" in crisp Segoe UI SemiBold
-                let hfont = CreateFontW(
-                    -12,
-                    0,
-                    0,
-                    0,
-                    FW_SEMIBOLD as i32,
-                    0,
-                    0,
-                    0,
-                    DEFAULT_CHARSET as u32,
-                    OUT_DEFAULT_PRECIS as u32,
-                    CLIP_DEFAULT_PRECIS as u32,
-                    CLEARTYPE_QUALITY as u32,
-                    0,
-                    font_name.as_ptr(),
-                );
-                let old_f = SelectObject(mem_dc, hfont as _);
-                SetTextColor(mem_dc, rgb(240, 245, 255));
-                let text: Vec<u16> = OsStr::new("LISTENING")
-                    .encode_wide()
-                    .chain(std::iter::once(0))
-                    .collect();
-                let mut text_rect = RECT {
-                    left: 104,
-                    top: 0,
-                    right: 198,
-                    bottom: OVERLAY_HEIGHT,
-                };
-                DrawTextW(
-                    mem_dc,
-                    text.as_ptr(),
-                    text.len() as i32 - 1,
-                    &mut text_rect,
-                    DT_SINGLELINE | DT_VCENTER,
-                );
-                SelectObject(mem_dc, old_f);
-                DeleteObject(hfont as _);
-
-                // D. Trailing Hotkey Chip: [F8 STOP]
-                let chip_brush = CreateSolidBrush(rgb(26, 30, 42));
-                let chip_pen = CreatePen(PS_SOLID, 1, rgb(48, 56, 78));
-                let old_p = SelectObject(mem_dc, chip_pen as _);
-                let old_b = SelectObject(mem_dc, chip_brush as _);
-                RoundRect(mem_dc, 204, 11, 276, 33, 10, 10);
-                SelectObject(mem_dc, old_p);
-                SelectObject(mem_dc, old_b);
-                DeleteObject(chip_brush as _);
-                DeleteObject(chip_pen as _);
-
-                let chip_font = CreateFontW(
-                    -10,
-                    0,
-                    0,
-                    0,
-                    FW_SEMIBOLD as i32,
-                    0,
-                    0,
-                    0,
-                    DEFAULT_CHARSET as u32,
-                    OUT_DEFAULT_PRECIS as u32,
-                    CLIP_DEFAULT_PRECIS as u32,
-                    CLEARTYPE_QUALITY as u32,
-                    0,
-                    font_name.as_ptr(),
-                );
-                let old_f = SelectObject(mem_dc, chip_font as _);
-                SetTextColor(mem_dc, rgb(160, 175, 205));
-                let chip_text: Vec<u16> = OsStr::new("F8 STOP")
-                    .encode_wide()
-                    .chain(std::iter::once(0))
-                    .collect();
-                let mut chip_rect = RECT {
-                    left: 204,
-                    top: 11,
-                    right: 276,
-                    bottom: 33,
-                };
-                DrawTextW(
-                    mem_dc,
-                    chip_text.as_ptr(),
-                    chip_text.len() as i32 - 1,
-                    &mut chip_rect,
-                    DT_CENTER | DT_SINGLELINE | DT_VCENTER,
-                );
-                SelectObject(mem_dc, old_f);
-                DeleteObject(chip_font as _);
             }
             OverlayState::Processing => {
-                // Animated Pulsing Violet Beacon
-                let wave = (tick as f32 * 0.2).sin().abs();
-                let beacon_r = (4.0 + wave * 3.0) as i32;
+                SMOOTHED_ACTIVITY.store(0, Ordering::Relaxed);
+                // Bouncing blocks animation
+                for i in 0..5i32 {
+                    let phase = ((tick as f32 * 0.25) + (i as f32 * 0.9)).sin().abs();
+                    let bar_h = (5.0 + phase * 25.0) as i32;
+                    let bx = 138 + i * 10;
+                    let by = (PILL_HEIGHT - bar_h) / 2;
 
-                let beacon_brush = CreateSolidBrush(rgb(168, 85, 247));
-                let beacon_pen = CreatePen(PS_SOLID, 1, rgb(216, 180, 254));
-                let old_p = SelectObject(mem_dc, beacon_pen as _);
-                let old_b = SelectObject(mem_dc, beacon_brush as _);
-                Ellipse(
-                    mem_dc,
-                    20 - beacon_r,
-                    22 - beacon_r,
-                    20 + beacon_r,
-                    22 + beacon_r,
-                );
-                SelectObject(mem_dc, old_p);
-                SelectObject(mem_dc, old_b);
-                DeleteObject(beacon_brush as _);
-                DeleteObject(beacon_pen as _);
-
-                // 5 Dancing Sweep Bars (Violet to Cyan)
-                let proc_colors = [
-                    rgb(168, 85, 247),
-                    rgb(139, 92, 246),
-                    rgb(99, 102, 241),
-                    rgb(56, 189, 248),
-                    rgb(0, 240, 255),
-                ];
-                for (i, &proc_color) in proc_colors.iter().enumerate() {
-                    let wave = ((tick as f32 * 0.28) + (i as f32 * 0.8)).sin().abs();
-                    let bar_h = (4.0 + wave * 16.0) as i32;
-                    let bx = 36 + (i as i32) * 7;
-                    let by = (OVERLAY_HEIGHT - bar_h) / 2;
-
-                    let bar_brush = CreateSolidBrush(proc_color);
-                    let bar_pen = CreatePen(PS_SOLID, 1, proc_color);
+                    let bar_brush = CreateSolidBrush(accent_color);
+                    let bar_pen = CreatePen(PS_SOLID, 1, accent_color);
                     let old_p = SelectObject(mem_dc, bar_pen as _);
                     let old_b = SelectObject(mem_dc, bar_brush as _);
-                    RoundRect(mem_dc, bx, by, bx + 4, by + bar_h, 4, 4);
+                    RoundRect(mem_dc, bx, by, bx + 6, by + bar_h, 3, 3);
                     SelectObject(mem_dc, old_p);
                     SelectObject(mem_dc, old_b);
                     DeleteObject(bar_brush as _);
                     DeleteObject(bar_pen as _);
                 }
-
-                // Typography: "RACING LPUs..."
-                let hfont = CreateFontW(
-                    -12,
-                    0,
-                    0,
-                    0,
-                    FW_SEMIBOLD as i32,
-                    0,
-                    0,
-                    0,
-                    DEFAULT_CHARSET as u32,
-                    OUT_DEFAULT_PRECIS as u32,
-                    CLIP_DEFAULT_PRECIS as u32,
-                    CLEARTYPE_QUALITY as u32,
-                    0,
-                    font_name.as_ptr(),
-                );
-                let old_f = SelectObject(mem_dc, hfont as _);
-                SetTextColor(mem_dc, rgb(0, 240, 255));
-                let text: Vec<u16> = OsStr::new("RACING LPUs...")
-                    .encode_wide()
-                    .chain(std::iter::once(0))
-                    .collect();
-                let mut text_rect = RECT {
-                    left: 78,
-                    top: 0,
-                    right: 198,
-                    bottom: OVERLAY_HEIGHT,
-                };
-                DrawTextW(
-                    mem_dc,
-                    text.as_ptr(),
-                    text.len() as i32 - 1,
-                    &mut text_rect,
-                    DT_SINGLELINE | DT_VCENTER,
-                );
-                SelectObject(mem_dc, old_f);
-                DeleteObject(hfont as _);
-
-                // Trailing Chip: [DUAL LPU]
-                let chip_brush = CreateSolidBrush(rgb(38, 22, 54));
-                let chip_pen = CreatePen(PS_SOLID, 1, rgb(98, 48, 140));
-                let old_p = SelectObject(mem_dc, chip_pen as _);
-                let old_b = SelectObject(mem_dc, chip_brush as _);
-                RoundRect(mem_dc, 204, 11, 276, 33, 10, 10);
-                SelectObject(mem_dc, old_p);
-                SelectObject(mem_dc, old_b);
-                DeleteObject(chip_brush as _);
-                DeleteObject(chip_pen as _);
-
-                let chip_font = CreateFontW(
-                    -10,
-                    0,
-                    0,
-                    0,
-                    FW_SEMIBOLD as i32,
-                    0,
-                    0,
-                    0,
-                    DEFAULT_CHARSET as u32,
-                    OUT_DEFAULT_PRECIS as u32,
-                    CLIP_DEFAULT_PRECIS as u32,
-                    CLEARTYPE_QUALITY as u32,
-                    0,
-                    font_name.as_ptr(),
-                );
-                let old_f = SelectObject(mem_dc, chip_font as _);
-                SetTextColor(mem_dc, rgb(216, 180, 254));
-                let chip_text: Vec<u16> = OsStr::new("DUAL LPU")
-                    .encode_wide()
-                    .chain(std::iter::once(0))
-                    .collect();
-                let mut chip_rect = RECT {
-                    left: 204,
-                    top: 11,
-                    right: 276,
-                    bottom: 33,
-                };
-                DrawTextW(
-                    mem_dc,
-                    chip_text.as_ptr(),
-                    chip_text.len() as i32 - 1,
-                    &mut chip_rect,
-                    DT_CENTER | DT_SINGLELINE | DT_VCENTER,
-                );
-                SelectObject(mem_dc, old_f);
-                DeleteObject(chip_font as _);
             }
             OverlayState::Done => {
-                // Emerald Success Badge Dot
-                let emerald_brush = CreateSolidBrush(rgb(16, 185, 129));
-                let emerald_pen = CreatePen(PS_SOLID, 1, rgb(52, 211, 153));
-                let old_p = SelectObject(mem_dc, emerald_pen as _);
-                let old_b = SelectObject(mem_dc, emerald_brush as _);
-                Ellipse(mem_dc, 15, 17, 25, 27);
-                SelectObject(mem_dc, old_p);
-                SelectObject(mem_dc, old_b);
-                DeleteObject(emerald_brush as _);
-                DeleteObject(emerald_pen as _);
-
-                // 5 Settled Emerald Accent Bars
+                // Settled flat bars
                 for i in 0..5i32 {
-                    let bx = 36 + i * 7;
+                    let bx = 138 + i * 10;
                     let bar_h = 5;
-                    let by = (OVERLAY_HEIGHT - bar_h) / 2;
+                    let by = (PILL_HEIGHT - bar_h) / 2;
 
-                    let bar_brush = CreateSolidBrush(rgb(16, 185, 129));
-                    let bar_pen = CreatePen(PS_SOLID, 1, rgb(52, 211, 153));
+                    let bar_brush = CreateSolidBrush(accent_color);
+                    let bar_pen = CreatePen(PS_SOLID, 1, accent_color);
                     let old_p = SelectObject(mem_dc, bar_pen as _);
                     let old_b = SelectObject(mem_dc, bar_brush as _);
-                    RoundRect(mem_dc, bx, by, bx + 4, by + bar_h, 4, 4);
+                    RoundRect(mem_dc, bx, by, bx + 6, by + bar_h, 3, 3);
                     SelectObject(mem_dc, old_p);
                     SelectObject(mem_dc, old_b);
                     DeleteObject(bar_brush as _);
                     DeleteObject(bar_pen as _);
                 }
-
-                // Typography: "DELIVERED"
-                let hfont = CreateFontW(
-                    -12,
-                    0,
-                    0,
-                    0,
-                    FW_SEMIBOLD as i32,
-                    0,
-                    0,
-                    0,
-                    DEFAULT_CHARSET as u32,
-                    OUT_DEFAULT_PRECIS as u32,
-                    CLIP_DEFAULT_PRECIS as u32,
-                    CLEARTYPE_QUALITY as u32,
-                    0,
-                    font_name.as_ptr(),
-                );
-                let old_f = SelectObject(mem_dc, hfont as _);
-                SetTextColor(mem_dc, rgb(52, 211, 153));
-                let text: Vec<u16> = OsStr::new("DELIVERED")
-                    .encode_wide()
-                    .chain(std::iter::once(0))
-                    .collect();
-                let mut text_rect = RECT {
-                    left: 78,
-                    top: 0,
-                    right: 198,
-                    bottom: OVERLAY_HEIGHT,
-                };
-                DrawTextW(
-                    mem_dc,
-                    text.as_ptr(),
-                    text.len() as i32 - 1,
-                    &mut text_rect,
-                    DT_SINGLELINE | DT_VCENTER,
-                );
-                SelectObject(mem_dc, old_f);
-                DeleteObject(hfont as _);
-
-                // Trailing Chip: [PASTED]
-                let chip_brush = CreateSolidBrush(rgb(16, 44, 30));
-                let chip_pen = CreatePen(PS_SOLID, 1, rgb(24, 96, 60));
-                let old_p = SelectObject(mem_dc, chip_pen as _);
-                let old_b = SelectObject(mem_dc, chip_brush as _);
-                RoundRect(mem_dc, 204, 11, 276, 33, 10, 10);
-                SelectObject(mem_dc, old_p);
-                SelectObject(mem_dc, old_b);
-                DeleteObject(chip_brush as _);
-                DeleteObject(chip_pen as _);
-
-                let chip_font = CreateFontW(
-                    -10,
-                    0,
-                    0,
-                    0,
-                    FW_SEMIBOLD as i32,
-                    0,
-                    0,
-                    0,
-                    DEFAULT_CHARSET as u32,
-                    OUT_DEFAULT_PRECIS as u32,
-                    CLIP_DEFAULT_PRECIS as u32,
-                    CLEARTYPE_QUALITY as u32,
-                    0,
-                    font_name.as_ptr(),
-                );
-                let old_f = SelectObject(mem_dc, chip_font as _);
-                SetTextColor(mem_dc, rgb(110, 231, 183));
-                let chip_text: Vec<u16> = OsStr::new("PASTED")
-                    .encode_wide()
-                    .chain(std::iter::once(0))
-                    .collect();
-                let mut chip_rect = RECT {
-                    left: 204,
-                    top: 11,
-                    right: 276,
-                    bottom: 33,
-                };
-                DrawTextW(
-                    mem_dc,
-                    chip_text.as_ptr(),
-                    chip_text.len() as i32 - 1,
-                    &mut chip_rect,
-                    DT_CENTER | DT_SINGLELINE | DT_VCENTER,
-                );
-                SelectObject(mem_dc, old_f);
-                DeleteObject(chip_font as _);
             }
+            OverlayState::Hidden => {}
         }
+
+        // 5. Chip button (right side) — black bg with bold white text, thick border
+        let chip_bg = CreateSolidBrush(rgb(0, 0, 0));
+        let chip_border = CreatePen(PS_SOLID, 2, rgb(0, 0, 0));
+        let old_p = SelectObject(mem_dc, chip_border as _);
+        let old_b = SelectObject(mem_dc, chip_bg as _);
+        RoundRect(mem_dc, 204, 12, 268, 36, 8, 8);
+        SelectObject(mem_dc, old_p);
+        SelectObject(mem_dc, old_b);
+        DeleteObject(chip_bg as _);
+        DeleteObject(chip_border as _);
+
+        draw_chip_text(
+            mem_dc, chip_label,
+            RECT { left: 204, top: 12, right: 268, bottom: 36 },
+            rgb(255, 255, 255),
+        );
 
         // Blit back-buffer to screen
         BitBlt(
-            hdc,
-            0,
-            0,
-            OVERLAY_WIDTH,
-            OVERLAY_HEIGHT,
-            mem_dc,
-            0,
-            0,
-            SRCCOPY,
+            hdc, 0, 0, OVERLAY_WIDTH, OVERLAY_HEIGHT,
+            mem_dc, 0, 0, SRCCOPY,
         );
 
-        // Cleanup double buffering objects
+        // Cleanup
         SelectObject(mem_dc, old_bmp);
         DeleteObject(mem_bmp as _);
         DeleteDC(mem_dc);

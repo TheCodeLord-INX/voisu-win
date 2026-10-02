@@ -42,11 +42,30 @@ struct Cli {
 #[derive(Subcommand, Debug)]
 enum Commands {
     /// Start the Voisu dictation daemon
-    Run,
+    Run {
+        /// Start minimized to system tray (hide console window)
+        #[arg(short, long)]
+        tray: bool,
+    },
+    /// Manage automatic startup on Windows login
+    Autostart {
+        #[command(subcommand)]
+        action: Option<AutostartAction>,
+    },
     /// Run the interactive configuration setup wizard
     Setup,
     /// Run system diagnostics (audio input, network latency, Win32 hooks)
     Doctor,
+}
+
+#[derive(Subcommand, Debug)]
+pub enum AutostartAction {
+    /// Enable starting Voisu automatically on Windows login
+    Enable,
+    /// Disable starting Voisu automatically on Windows login
+    Disable,
+    /// Check current autostart status
+    Status,
 }
 
 #[tokio::main]
@@ -78,14 +97,54 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         AppConfig::load().unwrap_or_default()
     };
 
-    match cli.command.unwrap_or(Commands::Run) {
+    match cli.command.unwrap_or(Commands::Run { tray: false }) {
+        Commands::Autostart { action } => {
+            match action.unwrap_or(AutostartAction::Status) {
+                AutostartAction::Enable => {
+                    match voisu_win::platform::autostart::enable_autostart() {
+                        Ok(path) => {
+                            println!("[AUTOSTART] Successfully enabled! Voisu will start on Windows login.");
+                            println!("Executable  : {}", path.display());
+                            println!("Mode        : Silent system tray attachment (--tray)");
+                        }
+                        Err(e) => eprintln!("[AUTOSTART ERROR] Failed to enable: {}", e),
+                    }
+                }
+                AutostartAction::Disable => {
+                    match voisu_win::platform::autostart::disable_autostart() {
+                        Ok(()) => println!("[AUTOSTART] Successfully disabled from Windows login."),
+                        Err(e) => eprintln!("[AUTOSTART ERROR] Failed to disable: {}", e),
+                    }
+                }
+                AutostartAction::Status => {
+                    let enabled = voisu_win::platform::autostart::is_autostart_enabled();
+                    if enabled {
+                        println!("[AUTOSTART] Status: ENABLED (Starts automatically with Windows in tray mode)");
+                    } else {
+                        println!("[AUTOSTART] Status: DISABLED");
+                    }
+                }
+            }
+            return Ok(());
+        }
         Commands::Setup => {
             AppConfig::run_interactive_setup()?;
         }
         Commands::Doctor => {
             SystemDoctor::run_diagnostics(&config).await;
         }
-        Commands::Run => {
+        Commands::Run { tray: start_in_tray } => {
+            if start_in_tray {
+                unsafe {
+                    let console_hwnd = windows_sys::Win32::System::Console::GetConsoleWindow();
+                    if console_hwnd != 0 as _ {
+                        windows_sys::Win32::UI::WindowsAndMessaging::ShowWindow(
+                            console_hwnd,
+                            windows_sys::Win32::UI::WindowsAndMessaging::SW_HIDE,
+                        );
+                    }
+                }
+            }
             println!("============================================================");
             println!("       Voisu for Windows — Speech Dictation Daemon          ");
             println!("============================================================");
@@ -183,6 +242,43 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         _ = tray_interval.tick() => {
                             if let Some(tray_event) = tray.try_recv_event() {
                                 match tray_event {
+                                    TrayEvent::ToggleAutostart => {
+                                        match voisu_win::platform::autostart::toggle_autostart() {
+                                            Ok(true) => {
+                                                println!("\n[TRAY] Autostart ENABLED via system tray.");
+                                                tray.set_tooltip(&format!(
+                                                    "Voisu Dictation (Active: {:?}) [Autostart: ON]",
+                                                    config.trigger_key
+                                                ));
+                                            }
+                                            Ok(false) => {
+                                                println!("\n[TRAY] Autostart DISABLED via system tray.");
+                                                tray.set_tooltip(&format!(
+                                                    "Voisu Dictation (Active: {:?})",
+                                                    config.trigger_key
+                                                ));
+                                            }
+                                            Err(e) => {
+                                                eprintln!("\n[TRAY] Failed to toggle autostart: {}", e);
+                                            }
+                                        }
+                                    }
+                                    TrayEvent::ToggleConsole => {
+                                        unsafe {
+                                            let console_hwnd = windows_sys::Win32::System::Console::GetConsoleWindow();
+                                            if console_hwnd != 0 as _ {
+                                                let is_visible = windows_sys::Win32::UI::WindowsAndMessaging::IsWindowVisible(console_hwnd) != 0;
+                                                windows_sys::Win32::UI::WindowsAndMessaging::ShowWindow(
+                                                    console_hwnd,
+                                                    if is_visible {
+                                                        windows_sys::Win32::UI::WindowsAndMessaging::SW_HIDE
+                                                    } else {
+                                                        windows_sys::Win32::UI::WindowsAndMessaging::SW_SHOW
+                                                    },
+                                                );
+                                            }
+                                        }
+                                    }
                                     TrayEvent::RunDoctor => {
                                         println!("\n[TRAY] Running diagnostics on request...");
                                         SystemDoctor::run_diagnostics(&config).await;
@@ -208,7 +304,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             match event {
                                 Some(HotkeyEvent::StartRecording) => {
                                     println!("[● RECORDING] Listening... Speak now.");
-                                    overlay.set_recording(0.2);
+                                    overlay.set_recording(0.0);
                                     match engine.start_session() {
                                         Ok((mut frame_rx, session)) => {
                                             // Tap audio frames for live RMS UI feedback and feed to Deepgram

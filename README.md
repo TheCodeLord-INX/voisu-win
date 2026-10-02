@@ -1,0 +1,100 @@
+# Voisu for Windows
+
+Fast, dual-engine speech-to-text dictation client designed specifically for Windows.
+
+Voisu runs locally in the background, races two cloud speech engines in real time, arbitrates the best transcription, and types or copies the text right where your cursor is.
+
+---
+
+## Highlights
+
+- **Dual-Engine Race**: Streams audio simultaneously to Deepgram Nova-2 and Groq Whisper Large v3 LPUs, keeping latency around ~400ms.
+- **AI Name & Jargon Reconciler**: When engines disagree on tricky proper nouns or Hinglish, a background LPU prompt reconciles them instantly without manual dictionaries.
+- **Neo-Brutalist Floating Pill**: High-contrast, snappy visual feedback that pops up at the bottom of your screen when you speak and gets out of your way when done.
+- **Dynamic Waveform Visualizer**: Equalizer bars respond to your voice volume across low and high frequencies.
+- **Focus-Aware Delivery**: Pastes directly into active text inputs. If you're on your desktop or a non-editable surface, it silently copies the transcription to your clipboard instead.
+- **Background Tray & Boot Support**: Runs quietly in the Windows system tray. Can automatically start with Windows with zero console flicker.
+- **Smart Mic Detection**: Automatically detects and switches between built-in laptop mic arrays and external headsets.
+
+---
+
+## Requirements
+
+- Windows 10 or Windows 11 (x64)
+- Rust 1.80+ (to build from source)
+- API keys:
+  - [Deepgram](https://deepgram.com) API Key
+  - [Groq](https://groq.com) API Key
+
+---
+
+## Quick Setup
+
+### 1. Build from Source
+
+```powershell
+git clone https://github.com/INX2909/voisu-win.git
+cd voisu-win
+cargo build --release
+```
+
+The compiled binary will be located at `target\release\voisu-win.exe`.
+
+### 2. Configure API Credentials
+
+Run the interactive setup wizard:
+
+```powershell
+.\target\release\voisu-win.exe setup
+```
+
+You'll be prompted to enter your Deepgram and Groq API keys, choose a default hotkey (defaults to `F8`), and pick your delivery mode.
+
+You can verify your setup anytime with:
+
+```powershell
+.\target\release\voisu-win.exe doctor
+```
+
+### 3. Run the App
+
+#### Normal Mode (with console logs)
+```powershell
+.\target\release\voisu-win.exe run
+```
+
+#### Silent Tray Mode
+```powershell
+.\target\release\voisu-win.exe run --tray
+```
+
+Once running, press your trigger key (`F8` by default) and start speaking.
+
+---
+
+## Windows Startup & System Tray
+
+- **From the Tray**: Right-click the Voisu tray icon (next to your system clock) and click **Start with Windows** to toggle auto-start on boot.
+- **From the Terminal**:
+  ```powershell
+  # Check status
+  .\target\release\voisu-win.exe autostart status
+
+  # Enable autostart on boot
+  .\target\release\voisu-win.exe autostart enable
+
+  # Disable autostart
+  .\target\release\voisu-win.exe autostart disable
+  ```
+
+---
+
+## Configuration
+
+Config files live in `%APPDATA%\voisu\config.json`. You can inspect or tweak settings like hotkey modes, timeout windows, and audio device preferences directly.
+
+---
+
+## License
+
+MIT
