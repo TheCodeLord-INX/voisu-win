@@ -35,7 +35,8 @@ const CMD_AUTOSTART: usize = 100;
 const CMD_TOGGLE_CONSOLE: usize = 101;
 const CMD_DOCTOR: usize = 102;
 const CMD_CONFIG: usize = 103;
-const CMD_EXIT: usize = 104;
+const CMD_ABOUT: usize = 104;
+const CMD_EXIT: usize = 105;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TrayEvent {
@@ -43,6 +44,7 @@ pub enum TrayEvent {
     ToggleConsole,
     RunDoctor,
     OpenConfig,
+    About,
     Exit,
 }
 
@@ -339,6 +341,7 @@ fn show_context_menu(hwnd: HWND) {
             MF_STRING,
         );
         append_item(menu, CMD_CONFIG, "&Open Configuration Folder", MF_STRING);
+        append_item(menu, CMD_ABOUT, "&About Voisu", MF_STRING);
         AppendMenuW(menu, MF_SEPARATOR, 0, null_mut());
         append_item(menu, CMD_EXIT, "E&xit Voisu", MF_STRING);
 
@@ -377,6 +380,9 @@ fn show_context_menu(hwnd: HWND) {
             }
             CMD_CONFIG => {
                 let _ = tx.send(TrayEvent::OpenConfig);
+            }
+            CMD_ABOUT => {
+                let _ = tx.send(TrayEvent::About);
             }
             CMD_EXIT => {
                 let _ = tx.send(TrayEvent::Exit);

@@ -293,6 +293,33 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                                 .spawn();
                                         }
                                     }
+                                    TrayEvent::About => {
+                                        println!("\n[TRAY] About Voisu for Windows");
+                                        println!("Version       : {}", env!("CARGO_PKG_VERSION"));
+                                        println!("Author        : TheCodeLord-INX");
+                                        println!("Repository    : https://github.com/TheCodeLord-INX/voisu-win");
+                                        println!("Architecture  : Dual-Engine Parallel LPU Race (Deepgram Nova-2 + Groq Whisper)");
+                                        unsafe {
+                                            use std::ffi::OsStr;
+                                            use std::os::windows::ffi::OsStrExt;
+                                            let title: Vec<u16> = OsStr::new("About Voisu for Windows")
+                                                .encode_wide()
+                                                .chain(std::iter::once(0))
+                                                .collect();
+                                            let msg: Vec<u16> = OsStr::new(
+                                                "Voisu for Windows v0.1.0\n\nFast, dual-engine speech dictation client.\nParallel LPU Race: Deepgram Nova-2 & Groq Whisper Large v3.\n\nAuthor: TheCodeLord-INX\nGitHub: https://github.com/TheCodeLord-INX/voisu-win"
+                                            )
+                                            .encode_wide()
+                                            .chain(std::iter::once(0))
+                                            .collect();
+                                            windows_sys::Win32::UI::WindowsAndMessaging::MessageBoxW(
+                                                0 as _,
+                                                msg.as_ptr(),
+                                                title.as_ptr(),
+                                                windows_sys::Win32::UI::WindowsAndMessaging::MB_OK | windows_sys::Win32::UI::WindowsAndMessaging::MB_ICONINFORMATION,
+                                            );
+                                        }
+                                    }
                                     TrayEvent::Exit => {
                                         println!("\n[TRAY] Exit requested from system tray menu.");
                                         break;

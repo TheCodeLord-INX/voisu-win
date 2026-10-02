@@ -6,6 +6,16 @@ Voisu runs locally in the background, races two cloud speech engines in real tim
 
 ---
 
+## About Voisu
+
+Most Windows dictation tools fall into two camps: either they're clunky cloud apps running inside a browser tab, or built-in OS tools that feel slow and struggle with technical vocabulary, slang, and bilingual speech like Hinglish. Dictating your thoughts shouldn't break your train of thought.
+
+We built Voisu to solve that frustration. It sits quietly in your Windows system tray and gives you instant speech-to-text with a single keypress. Under the hood, it streams your voice to two independent engines at the same time—Deepgram Nova-2 and Groq Whisper Large v3 on LPUs. Whichever gives the cleanest, fastest transcription wins. If both engines stumble over a niche acronym or proper noun, a tiny background LPU reconciliation step fixes the disagreement before anything touches your screen.
+
+Everything happens in under 400 milliseconds. Punctuation signs, bullet points, numbered lists, and Markdown styling work naturally through voice commands. The app never steals window focus, pastes directly where you type, and respects your workflow.
+
+---
+
 ## Highlights
 
 - **Dual-Engine Race**: Streams audio simultaneously to Deepgram Nova-2 and Groq Whisper Large v3 LPUs, keeping latency around ~400ms.
