@@ -10,11 +10,41 @@ Voisu runs locally in the background, races two cloud speech engines in real tim
 
 - **Dual-Engine Race**: Streams audio simultaneously to Deepgram Nova-2 and Groq Whisper Large v3 LPUs, keeping latency around ~400ms.
 - **AI Name & Jargon Reconciler**: When engines disagree on tricky proper nouns or Hinglish, a background LPU prompt reconciles them instantly without manual dictionaries.
+- **Voice Commands & Formatting**: Speak punctuation names, Markdown headings, bullet lists, numbered lists, and bold/italic markup on the fly.
 - **Neo-Brutalist Floating Pill**: High-contrast, snappy visual feedback that pops up at the bottom of your screen when you speak and gets out of your way when done.
 - **Dynamic Waveform Visualizer**: Equalizer bars respond to your voice volume across low and high frequencies.
 - **Focus-Aware Delivery**: Pastes directly into active text inputs. If you're on your desktop or a non-editable surface, it silently copies the transcription to your clipboard instead.
 - **Background Tray & Boot Support**: Runs quietly in the Windows system tray. Can automatically start with Windows with zero console flicker.
 - **Smart Mic Detection**: Automatically detects and switches between built-in laptop mic arrays and external headsets.
+
+---
+
+## Voice Commands & Formatting
+
+Speak naturally — Voisu formats punctuation, lists, and markup on the fly with zero cloud roundtrips (< 1ms).
+
+### Punctuation & Symbols
+- **Exclamation & Questions**: Say `"exclamation"` $\to$ `!`, `"question mark"` $\to$ `?` (with clean spacing and capitalization).
+- **Basics**: Say `"comma"`, `"period"`, `"colon"`, `"semicolon"` $\to$ `,`, `.`, `:`, `;`
+- **Contractions & Quotes**: Say `"it apostrophe s"` $\to$ `it's`, `"apostrophe test apostrophe"` $\to$ `'test'`.
+- **Web & Social**: Say `"user at sign domain dot com"` $\to$ `user@domain.com`, `"hashtag trending"` $\to$ `#trending`.
+- **Numbers & Math**: Say `"dollar sign 50"` $\to$ `$50`, `"50 percent sign"` $\to$ `50%`, `"plus sign"`, `"equals sign"`.
+- **Code & Syntax**: Brackets (`[]`), braces (`{}`), angle brackets (`<>`), forward/backslash (`/`, `\`), pipes (`|`), tildes (`~`).
+
+### Lists & Headings
+- **Paragraphs**: Say `"create a paragraph"` or `"new paragraph"` for double line breaks.
+- **Bullet Lists**: Say `"create a list"` or `"bullet point"` $\to$ inserts `• ` items.
+- **Numbered Lists**: Say `"create a numbered list"` $\to$ begins with `1. `, then say `"next number"` to auto-increment (`2. `, `3. `...). Say `"end list"` when finished.
+- **Headings**: Say `"heading one"` through `"heading six"` for Markdown headings (`# ` through `###### `).
+
+### Text Markup
+- **Inline Styling**: Say `"bold urgent end bold"` $\to$ `**urgent**`. Supports `italic`, `code`, `underline`, and `strikethrough`.
+- **Retroactive Styling**: Say `"critical bold that"` $\to$ `**critical**`.
+- **Entire Sentence**: Say `"meeting postponed bold whole"` $\to$ `**Meeting postponed**`.
+
+### Corrections & Voice Undo
+- **In-sentence fix**: Say `"meet on Friday scratch that Saturday"` $\to$ drops the mistaken word and writes `"meet on Saturday"`.
+- **Instant undo**: Say `"scratch that"` or `"undo that"` right after dictating to delete the last pasted phrase.
 
 ---
 
