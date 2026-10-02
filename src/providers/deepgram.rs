@@ -122,6 +122,8 @@ impl DeepgramClient {
         let ws_stream = self.connect().await?;
         let (mut ws_tx, mut ws_rx) = ws_stream.split();
 
+        let (close_tx, close_rx) = tokio::sync::oneshot::channel::<()>();
+
         // 1. Task to send binary PCM audio frames to Deepgram
         let send_task = tokio::spawn(async move {
             let mut total_samples = 0usize;
@@ -141,6 +143,7 @@ impl DeepgramClient {
             // Send close stream message to notify Deepgram audio is finished
             let close_msg = serde_json::json!({ "type": "CloseStream" }).to_string();
             let _ = ws_tx.send(Message::Text(close_msg.into())).await;
+            let _ = close_tx.send(());
             total_samples
         });
 
@@ -148,8 +151,32 @@ impl DeepgramClient {
         let mut final_transcript = String::new();
         let mut all_words = Vec::new();
         let mut total_duration_sec = 0.0;
+        let mut close_sent = false;
+        let mut close_rx = close_rx;
 
-        while let Some(msg) = ws_rx.next().await {
+        loop {
+            let next_msg = if close_sent {
+                match tokio::time::timeout(std::time::Duration::from_millis(1500), ws_rx.next())
+                    .await
+                {
+                    Ok(msg) => msg,
+                    Err(_) => {
+                        debug!("Deepgram receive timed out after CloseStream");
+                        break;
+                    }
+                }
+            } else {
+                tokio::select! {
+                    msg = ws_rx.next() => msg,
+                    _ = &mut close_rx => {
+                        close_sent = true;
+                        continue;
+                    }
+                }
+            };
+
+            let Some(msg) = next_msg else { break };
+
             match msg {
                 Ok(Message::Text(text)) => {
                     if let Ok(resp) = serde_json::from_str::<DeepgramResponse>(&text) {

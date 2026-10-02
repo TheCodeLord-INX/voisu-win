@@ -181,8 +181,10 @@ impl DualProviderCoordinator {
             }
         });
 
-        let deadline = tokio::time::sleep(DUAL_PROVIDER_DEADLINE);
-        let mut deadline = std::pin::pin!(deadline);
+        let overall_timeout = tokio::time::sleep(Duration::from_millis(5000));
+        let mut overall_timeout = std::pin::pin!(overall_timeout);
+
+        let mut grace_timer: Option<std::pin::Pin<Box<tokio::time::Sleep>>> = None;
 
         let mut dg_done = !has_deepgram;
         let mut groq_done = !has_groq;
@@ -193,7 +195,12 @@ impl DualProviderCoordinator {
                     dg_done = true;
                     if let Some(r) = res {
                         match r {
-                            Ok(t) => deepgram_result = Some(t),
+                            Ok(t) => {
+                                deepgram_result = Some(t);
+                                if grace_timer.is_none() && !groq_done {
+                                    grace_timer = Some(Box::pin(tokio::time::sleep(Duration::from_millis(600))));
+                                }
+                            }
                             Err(e) => deepgram_err = Some(e),
                         }
                     }
@@ -202,13 +209,28 @@ impl DualProviderCoordinator {
                     groq_done = true;
                     if let Some(r) = res {
                         match r {
-                            Ok(t) => groq_result = Some(t),
+                            Ok(t) => {
+                                groq_result = Some(t);
+                                if grace_timer.is_none() && !dg_done {
+                                    grace_timer = Some(Box::pin(tokio::time::sleep(Duration::from_millis(600))));
+                                }
+                            }
                             Err(e) => groq_err = Some(e),
                         }
                     }
                 }
-                _ = &mut deadline => {
-                    warn!("Dual-provider deadline (800ms) expired. Evaluating partial results...");
+                _ = async {
+                    if let Some(ref mut timer) = grace_timer {
+                        timer.as_mut().await;
+                    } else {
+                        std::future::pending::<()>().await;
+                    }
+                } => {
+                    info!("Dual-provider grace window (600ms) expired. Evaluating available result.");
+                    break;
+                }
+                _ = &mut overall_timeout => {
+                    warn!("Overall STT provider deadline (5000ms) expired. Evaluating partial results...");
                     break;
                 }
             }

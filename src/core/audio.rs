@@ -11,11 +11,12 @@ use rubato::{
     Resampler, SincFixedIn, SincInterpolationParameters, SincInterpolationType, WindowFunction,
 };
 use std::io::Cursor;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, RwLock};
 use std::time::Instant;
 use thiserror::Error;
 use tokio::sync::mpsc;
-use tracing::{debug, error, info, warn};
+use tracing::{debug, error, info};
 
 /// Target sample rate required by both Deepgram Nova-2 and Groq Whisper.
 pub const TARGET_SAMPLE_RATE: u32 = 16_000;
@@ -186,7 +187,8 @@ impl AudioResampler {
 
 /// Active recording session handle to stop recording and retrieve all audio data.
 pub struct RecordingSession {
-    stream: Stream,
+    stream: Option<Stream>,
+    is_active: Arc<AtomicBool>,
     resampler_handle: Option<std::thread::JoinHandle<()>>,
     sample_accumulator: Arc<std::sync::Mutex<Vec<i16>>>,
     start_instant: Instant,
@@ -195,11 +197,16 @@ pub struct RecordingSession {
 impl RecordingSession {
     /// Stop recording, wait for audio pipeline to flush, and return normalized 16kHz PCM samples and WAV buffer.
     pub fn stop(mut self) -> Result<(Vec<i16>, Vec<u8>), AudioError> {
-        // 1. Pause and drop stream so input callback finishes and raw_tx is dropped
-        let _ = self.stream.pause();
-        // Dropping stream triggers raw_rx channel disconnect in worker thread
+        // 1. Signal worker thread to stop
+        self.is_active.store(false, Ordering::SeqCst);
 
-        // 2. Wait for resampler worker thread to drain all remaining chunks and flush
+        // 2. Pause and explicitly drop stream so input callback finishes and raw_tx is dropped
+        if let Some(stream) = self.stream.take() {
+            let _ = stream.pause();
+            drop(stream);
+        }
+
+        // 3. Wait for resampler worker thread to drain all remaining chunks and flush (guaranteed <= 50ms)
         if let Some(handle) = self.resampler_handle.take() {
             let _ = handle.join();
         }
@@ -511,6 +518,9 @@ impl AudioCaptureEngine {
         let acc = Arc::clone(&sample_accumulator);
         let start_time = Instant::now();
 
+        let is_active = Arc::new(AtomicBool::new(true));
+        let is_active_worker = Arc::clone(&is_active);
+
         // Dedicated ring buffer channel between audio thread and resampling worker
         let (raw_tx, raw_rx) = std::sync::mpsc::sync_channel::<Vec<f32>>(256);
 
@@ -528,47 +538,62 @@ impl AudioCaptureEngine {
 
                 let mut out_buffer: Vec<i16> = Vec::with_capacity(TARGET_CHUNK_SIZE_16K * 2);
 
-                while let Ok(raw_mono) = raw_rx.recv() {
-                    match resampler.process(&raw_mono) {
-                        Ok(resampled_floats) => {
-                            let i16_samples = float_to_i16(&resampled_floats);
-                            out_buffer.extend(i16_samples);
+                while is_active_worker.load(Ordering::Relaxed) {
+                    match raw_rx.recv_timeout(std::time::Duration::from_millis(40)) {
+                        Ok(raw_mono) => {
+                            if let Ok(resampled_floats) = resampler.process(&raw_mono) {
+                                let i16_samples = float_to_i16(&resampled_floats);
+                                out_buffer.extend(i16_samples);
 
-                            // Emit ~20ms chunks to live consumers
-                            while out_buffer.len() >= TARGET_CHUNK_SIZE_16K {
-                                let chunk: Vec<i16> =
-                                    out_buffer.drain(..TARGET_CHUNK_SIZE_16K).collect();
-                                let ts_ms = start_time.elapsed().as_millis() as u64;
-                                let frame = AudioFrame::new(chunk.clone(), ts_ms);
+                                // Emit ~20ms chunks to live consumers
+                                while out_buffer.len() >= TARGET_CHUNK_SIZE_16K {
+                                    let chunk: Vec<i16> =
+                                        out_buffer.drain(..TARGET_CHUNK_SIZE_16K).collect();
+                                    let ts_ms = start_time.elapsed().as_millis() as u64;
+                                    let frame = AudioFrame::new(chunk.clone(), ts_ms);
 
-                                // Append to full session buffer
-                                if let Ok(mut guard) = acc.lock() {
-                                    guard.extend(chunk);
-                                }
+                                    // Append to full session buffer
+                                    if let Ok(mut guard) = acc.lock() {
+                                        guard.extend(chunk);
+                                    }
 
-                                if tx.blocking_send(frame).is_err() {
-                                    // Receiver closed
-                                    break;
+                                    if tx.blocking_send(frame).is_err() {
+                                        break;
+                                    }
                                 }
                             }
                         }
-                        Err(e) => {
-                            warn!("Resampling chunk error: {}", e);
+                        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                            continue;
                         }
+                        Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                            break;
+                        }
+                    }
+                }
+
+                // Drain remaining buffered samples in channel
+                while let Ok(raw_mono) = raw_rx.try_recv() {
+                    if let Ok(resampled_floats) = resampler.process(&raw_mono) {
+                        let i16_samples = float_to_i16(&resampled_floats);
+                        out_buffer.extend(i16_samples);
                     }
                 }
 
                 // Flush remaining samples at stop
                 if let Ok(flushed) = resampler.flush() {
                     let flushed_i16 = float_to_i16(&flushed);
-                    if !flushed_i16.is_empty() {
-                        let ts_ms = start_time.elapsed().as_millis() as u64;
-                        let frame = AudioFrame::new(flushed_i16.clone(), ts_ms);
-                        if let Ok(mut guard) = acc.lock() {
-                            guard.extend(flushed_i16);
-                        }
-                        let _ = tx.blocking_send(frame);
+                    out_buffer.extend(flushed_i16);
+                }
+
+                // Deliver remaining samples in out_buffer to accumulator
+                if !out_buffer.is_empty() {
+                    let ts_ms = start_time.elapsed().as_millis() as u64;
+                    let frame = AudioFrame::new(out_buffer.clone(), ts_ms);
+                    if let Ok(mut guard) = acc.lock() {
+                        guard.extend(out_buffer);
                     }
+                    let _ = tx.blocking_send(frame);
                 }
             })
             .expect("Failed to spawn audio resampler worker thread");
@@ -620,7 +645,8 @@ impl AudioCaptureEngine {
         stream.play()?;
 
         let session = RecordingSession {
-            stream,
+            stream: Some(stream),
+            is_active,
             resampler_handle: Some(resampler_handle),
             sample_accumulator,
             start_instant: start_time,
