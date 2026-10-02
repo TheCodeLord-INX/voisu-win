@@ -1,3 +1,3 @@
 pub mod clipboard;
 
-pub use clipboard::{ClipboardInjector, DeliveryError};
+pub use clipboard::{ClipboardInjector, DeliveryError, DeliveryOutcome};

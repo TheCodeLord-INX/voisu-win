@@ -11,7 +11,7 @@ use std::ptr::null_mut;
 use std::thread::sleep;
 use std::time::Duration;
 use thiserror::Error;
-use tracing::{debug, warn};
+use tracing::{debug, info, warn};
 use windows_sys::Win32::Foundation::{HANDLE, HWND};
 use windows_sys::Win32::System::DataExchange::{
     CloseClipboard, EmptyClipboard, GetClipboardData, IsClipboardFormatAvailable, OpenClipboard,
@@ -20,6 +20,10 @@ use windows_sys::Win32::System::DataExchange::{
 use windows_sys::Win32::System::Memory::{GMEM_MOVEABLE, GlobalAlloc, GlobalLock, GlobalUnlock};
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
     INPUT, KEYBDINPUT, KEYEVENTF_KEYUP, KEYEVENTF_UNICODE, SendInput, VK_CONTROL,
+};
+use windows_sys::Win32::UI::WindowsAndMessaging::{
+    CURSORINFO, GUI_CARETBLINKING, GUITHREADINFO, GetClassNameW, GetCursorInfo,
+    GetForegroundWindow, GetGUIThreadInfo, GetWindowThreadProcessId, IDC_IBEAM, LoadCursorW,
 };
 
 /// Win32 standard clipboard format for Unicode text (CF_UNICODETEXT = 13).
@@ -45,6 +49,15 @@ pub struct ClipboardInjector {
     exclude_format_id: u32,
 }
 
+/// Outcome of a transcription delivery operation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DeliveryOutcome {
+    /// Injected text directly into the focused text box (and restored prior clipboard).
+    Injected,
+    /// Cursor was not focused on any text box; transcribed text was copied to the clipboard.
+    CopiedToClipboard,
+}
+
 impl ClipboardInjector {
     pub fn new(restore_timeout_ms: u32) -> Self {
         // Register Windows 11 clipboard history exclusion format
@@ -64,11 +77,118 @@ impl ClipboardInjector {
         self.restore_timeout_ms
     }
 
-    /// Primary delivery entry point dispatching either Smart Clipboard or direct SendInput typing.
-    pub fn deliver(&self, text: &str, mode: DeliveryMode) -> Result<(), DeliveryError> {
+    /// Check whether the foreground application has an active text box or blinking caret focused.
+    pub fn is_text_box_focused(&self) -> bool {
+        unsafe {
+            let fg = GetForegroundWindow();
+            if fg.is_null() {
+                return false;
+            }
+
+            // Check if foreground window is desktop or taskbar
+            let mut fg_class_buf = [0u16; 256];
+            let fg_len = GetClassNameW(fg, fg_class_buf.as_mut_ptr(), 256);
+            if fg_len > 0 {
+                let fg_class =
+                    String::from_utf16_lossy(&fg_class_buf[..fg_len as usize]).to_lowercase();
+                if fg_class == "progman"
+                    || fg_class == "workerw"
+                    || fg_class == "shell_traywnd"
+                    || fg_class == "shell_secondarytraywnd"
+                {
+                    return false;
+                }
+            }
+
+            let tid = GetWindowThreadProcessId(fg, std::ptr::null_mut());
+            let mut gui: GUITHREADINFO = std::mem::zeroed();
+            gui.cbSize = std::mem::size_of::<GUITHREADINFO>() as u32;
+
+            if GetGUIThreadInfo(tid, &mut gui) != 0 {
+                // 1. If an actual Win32 caret window exists
+                if !gui.hwndCaret.is_null() {
+                    return true;
+                }
+
+                // 2. If the caret is blinking
+                if (gui.flags & GUI_CARETBLINKING) != 0 {
+                    return true;
+                }
+
+                // 3. If the caret rectangle has positive height (reported by Chromium, Electron, WPF, Java)
+                if gui.rcCaret.bottom > gui.rcCaret.top {
+                    return true;
+                }
+
+                // 4. Check the focused control window class name
+                let focus = if !gui.hwndFocus.is_null() {
+                    gui.hwndFocus
+                } else {
+                    gui.hwndActive
+                };
+                if !focus.is_null() {
+                    let mut class_buf = [0u16; 256];
+                    let len = GetClassNameW(focus, class_buf.as_mut_ptr(), 256);
+                    if len > 0 {
+                        let class_name =
+                            String::from_utf16_lossy(&class_buf[..len as usize]).to_lowercase();
+                        if class_name.contains("edit")
+                            || class_name.contains("scintilla")
+                            || class_name.contains("terminal")
+                            || class_name.contains("console")
+                            || class_name.contains("textbox")
+                            || class_name.contains("textarea")
+                            || class_name.contains("rich")
+                        {
+                            return true;
+                        }
+                    }
+                }
+            }
+
+            // 5. Check mouse cursor icon (I-beam cursor indicates text field hover/focus)
+            let mut cursor_info: CURSORINFO = std::mem::zeroed();
+            cursor_info.cbSize = std::mem::size_of::<CURSORINFO>() as u32;
+            if GetCursorInfo(&mut cursor_info) != 0 {
+                let ibeam = LoadCursorW(null_mut(), IDC_IBEAM);
+                if cursor_info.hCursor == ibeam {
+                    return true;
+                }
+            }
+
+            false
+        }
+    }
+
+    /// Primary delivery entry point:
+    /// - If cursor is focused on a text box: injects via SmartClipboard or direct typing and restores prior clipboard.
+    /// - If cursor is NOT focused on any text box: copies transcribed text to Windows clipboard and leaves it there.
+    pub fn deliver(
+        &self,
+        text: &str,
+        mode: DeliveryMode,
+    ) -> Result<DeliveryOutcome, DeliveryError> {
+        let text_box_focused = self.is_text_box_focused();
+
+        if !text_box_focused {
+            // Cursor is not focused on any text box:
+            // Copy transcript to clipboard without exclusion format so it's in standard clipboard and history.
+            // Do NOT synthesize Ctrl+V, and do NOT restore prior clipboard.
+            self.set_clipboard_text(text, false)?;
+            info!("No text box focused; transcribed text copied to Windows clipboard.");
+            return Ok(DeliveryOutcome::CopiedToClipboard);
+        }
+
+        // Text box is focused: perform injection
         match mode {
-            DeliveryMode::SmartClipboard => self.deliver_smart_clipboard(text),
-            DeliveryMode::SendInputUnicode => self.deliver_unicode_direct(text),
+            DeliveryMode::SmartClipboard => {
+                self.deliver_smart_clipboard(text)?;
+                Ok(DeliveryOutcome::Injected)
+            }
+            DeliveryMode::SendInputUnicode => {
+                self.deliver_unicode_direct(text)?;
+                Ok(DeliveryOutcome::Injected)
+            }
         }
     }
 
@@ -328,5 +448,20 @@ mod tests {
         if let Some(orig) = original {
             let _ = injector.set_clipboard_text(&orig, false);
         }
+    }
+
+    #[test]
+    fn test_is_text_box_focused_safety() {
+        let injector = ClipboardInjector::new(100);
+        // Call should run safely without crash regardless of environment
+        let _ = injector.is_text_box_focused();
+    }
+
+    #[test]
+    fn test_delivery_outcome_types() {
+        assert_ne!(
+            DeliveryOutcome::Injected,
+            DeliveryOutcome::CopiedToClipboard
+        );
     }
 }

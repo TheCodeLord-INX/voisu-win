@@ -309,11 +309,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                                             println!("  [Final Text] >>> \"{}\"", formatted);
                                                             println!("------------------------------------------------------------");
 
-                                                            // Smart Clipboard Delivery into focused window
-                                                            if let Err(e) = inj.deliver(&formatted, delivery_mode) {
-                                                                eprintln!("[ERROR] Text delivery failed: {}", e);
-                                                            } else {
-                                                                println!("[DELIVERED] Injected into focused window via {:?}.", delivery_mode);
+                                                            // Smart Delivery: Injects if focused on text box, or copies to clipboard if not
+                                                            match inj.deliver(&formatted, delivery_mode) {
+                                                                Ok(voisu_win::delivery::DeliveryOutcome::Injected) => {
+                                                                    println!("[DELIVERED] Injected into focused text box via {:?}.", delivery_mode);
+                                                                }
+                                                                Ok(voisu_win::delivery::DeliveryOutcome::CopiedToClipboard) => {
+                                                                    println!("[COPIED] Cursor not focused on text box. Transcribed text copied to clipboard.");
+                                                                }
+                                                                Err(e) => {
+                                                                    eprintln!("[ERROR] Text delivery failed: {}", e);
+                                                                }
                                                             }
 
                                                             // Visual Pill Feedback: Show Done for 800ms then hide
