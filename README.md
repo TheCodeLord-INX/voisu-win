@@ -33,7 +33,7 @@ Voisu runs locally in the background, races two cloud speech engines in real tim
 ### 1. Build from Source
 
 ```powershell
-git clone https://github.com/INX2909/voisu-win.git
+git clone https://github.com/TheCodeLord-INX/voisu-win.git
 cd voisu-win
 cargo build --release
 ```
