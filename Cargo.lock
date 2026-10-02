@@ -2236,6 +2236,7 @@ dependencies = [
  "clap",
  "cpal",
  "dirs",
+ "futures-util",
  "hound",
  "regex",
  "reqwest",
