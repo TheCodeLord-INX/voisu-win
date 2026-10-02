@@ -12,7 +12,6 @@ use rubato::{
 };
 use std::io::Cursor;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Instant;
 use thiserror::Error;
 use tokio::sync::mpsc;
@@ -187,25 +186,49 @@ impl AudioResampler {
 
 /// Active recording session handle to stop recording and retrieve all audio data.
 pub struct RecordingSession {
-    _stream: Stream,
-    is_recording: Arc<AtomicBool>,
+    stream: Stream,
+    resampler_handle: Option<std::thread::JoinHandle<()>>,
     sample_accumulator: Arc<std::sync::Mutex<Vec<i16>>>,
     start_instant: Instant,
 }
 
 impl RecordingSession {
-    /// Stop recording and return complete accumulated 16kHz PCM samples and WAV buffer.
-    pub fn stop(self) -> Result<(Vec<i16>, Vec<u8>), AudioError> {
-        self.is_recording.store(false, Ordering::SeqCst);
-        let samples = {
+    /// Stop recording, wait for audio pipeline to flush, and return normalized 16kHz PCM samples and WAV buffer.
+    pub fn stop(mut self) -> Result<(Vec<i16>, Vec<u8>), AudioError> {
+        // 1. Pause and drop stream so input callback finishes and raw_tx is dropped
+        let _ = self.stream.pause();
+        // Dropping stream triggers raw_rx channel disconnect in worker thread
+
+        // 2. Wait for resampler worker thread to drain all remaining chunks and flush
+        if let Some(handle) = self.resampler_handle.take() {
+            let _ = handle.join();
+        }
+
+        // 3. Extract accumulated samples
+        let mut samples = {
             let guard = self.sample_accumulator.lock().unwrap();
             guard.clone()
         };
+
+        // 4. Auto-Gain Normalization: boost quiet laptop microphones into optimal speech range
+        let max_val = samples.iter().map(|&s| s.abs()).max().unwrap_or(0);
+        if max_val > 50 && max_val < 16000 {
+            let boost = (24000.0 / max_val as f32).min(8.0);
+            debug!(
+                "Applying auto-gain boost: {:.2}x (peak: {})",
+                boost, max_val
+            );
+            for s in &mut samples {
+                *s = (*s as f32 * boost).clamp(-32767.0, 32767.0) as i16;
+            }
+        }
+
         let wav_bytes = encode_to_wav(&samples, TARGET_SAMPLE_RATE)?;
-        debug!(
-            "Recording session stopped: {} samples ({}ms), WAV payload: {} bytes",
+        info!(
+            "Recording session stopped: {} samples ({}ms), peak: {}, WAV payload: {} bytes",
             samples.len(),
             self.start_instant.elapsed().as_millis(),
+            max_val,
             wav_bytes.len()
         );
         Ok((samples, wav_bytes))
@@ -252,14 +275,12 @@ impl AudioCaptureEngine {
         &self,
     ) -> Result<(mpsc::Receiver<AudioFrame>, RecordingSession), AudioError> {
         let (tx, rx) = mpsc::channel::<AudioFrame>(100);
-        let is_recording = Arc::new(AtomicBool::new(true));
         let sample_accumulator = Arc::new(std::sync::Mutex::new(Vec::new()));
 
         let channels = self.config.channels() as usize;
         let native_rate = self.config.sample_rate().0;
         let sample_format = self.config.sample_format();
 
-        let is_rec = Arc::clone(&is_recording);
         let acc = Arc::clone(&sample_accumulator);
         let start_time = Instant::now();
 
@@ -267,7 +288,7 @@ impl AudioCaptureEngine {
         let (raw_tx, raw_rx) = std::sync::mpsc::sync_channel::<Vec<f32>>(256);
 
         // Spawn high-priority resampling worker thread
-        std::thread::Builder::new()
+        let resampler_handle = std::thread::Builder::new()
             .name("voisu-audio-resampler".to_string())
             .spawn(move || {
                 let mut resampler = match AudioResampler::new(native_rate, TARGET_SAMPLE_RATE) {
@@ -281,9 +302,6 @@ impl AudioCaptureEngine {
                 let mut out_buffer: Vec<i16> = Vec::with_capacity(TARGET_CHUNK_SIZE_16K * 2);
 
                 while let Ok(raw_mono) = raw_rx.recv() {
-                    if !is_rec.load(Ordering::SeqCst) {
-                        break;
-                    }
                     match resampler.process(&raw_mono) {
                         Ok(resampled_floats) => {
                             let i16_samples = float_to_i16(&resampled_floats);
@@ -377,8 +395,8 @@ impl AudioCaptureEngine {
         stream.play()?;
 
         let session = RecordingSession {
-            _stream: stream,
-            is_recording,
+            stream,
+            resampler_handle: Some(resampler_handle),
             sample_accumulator,
             start_instant: start_time,
         };

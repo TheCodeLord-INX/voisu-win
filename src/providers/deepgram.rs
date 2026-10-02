@@ -16,7 +16,7 @@ use tokio_tungstenite::tungstenite::http::Request;
 use tokio_tungstenite::{MaybeTlsStream, WebSocketStream, connect_async};
 use tracing::{debug, warn};
 
-pub const DEEPGRAM_WS_URL: &str = "wss://api.deepgram.com/v1/listen?model=nova-2&smart_format=true&encoding=linear16&sample_rate=16000&channels=1";
+pub const DEEPGRAM_WS_URL: &str = "wss://api.deepgram.com/v1/listen?model=nova-2&smart_format=true&encoding=linear16&sample_rate=16000&channels=1&endpointing=300&utterance_end_ms=1000&interim_results=true";
 
 #[derive(Error, Debug)]
 pub enum DeepgramError {
@@ -153,6 +153,10 @@ impl DeepgramClient {
             match msg {
                 Ok(Message::Text(text)) => {
                     if let Ok(resp) = serde_json::from_str::<DeepgramResponse>(&text) {
+                        if resp.msg_type.as_deref() == Some("Metadata") {
+                            debug!("Deepgram Metadata received. Session complete.");
+                            break;
+                        }
                         if let Some(dur) = resp.duration {
                             total_duration_sec = dur;
                         }

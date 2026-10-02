@@ -14,7 +14,6 @@ use std::time::Duration;
 use thiserror::Error;
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
-use tokio::time::timeout;
 use tracing::{error, info, warn};
 
 /// Bounded deadline to wait for both providers to complete after recording stops.
@@ -142,68 +141,76 @@ impl DualProviderCoordinator {
         let mut groq_result: Option<SourceTranscript> = None;
         let mut groq_err: Option<String> = None;
 
-        let race_future = async {
-            let dg_fut = async {
-                if let Some(handle) = dg_task {
-                    match handle.await {
-                        Ok(Ok(transcript)) => Some(Ok(transcript)),
-                        Ok(Err(e)) => {
-                            let msg = e.to_string();
-                            warn!("Deepgram transcription failed: {}", msg);
-                            Some(Err(msg))
-                        }
-                        Err(e) => {
-                            let msg = e.to_string();
-                            error!("Deepgram task join error: {}", msg);
-                            Some(Err(msg))
-                        }
+        let mut dg_fut = std::pin::pin!(async {
+            if let Some(handle) = dg_task {
+                match handle.await {
+                    Ok(Ok(transcript)) => Some(Ok(transcript)),
+                    Ok(Err(e)) => {
+                        let msg = e.to_string();
+                        warn!("Deepgram transcription failed: {}", msg);
+                        Some(Err(msg))
                     }
-                } else {
-                    None
-                }
-            };
-
-            let groq_fut = async {
-                if let Some(handle) = groq_task {
-                    match handle.await {
-                        Ok(Ok(transcript)) => Some(Ok(transcript)),
-                        Ok(Err(e)) => {
-                            let msg = e.to_string();
-                            warn!("Groq transcription failed: {}", msg);
-                            Some(Err(msg))
-                        }
-                        Err(e) => {
-                            let msg = e.to_string();
-                            error!("Groq task join error: {}", msg);
-                            Some(Err(msg))
-                        }
-                    }
-                } else {
-                    None
-                }
-            };
-
-            tokio::join!(dg_fut, groq_fut)
-        };
-
-        // Apply bounded 800ms deadline to the joint race
-        match timeout(DUAL_PROVIDER_DEADLINE, race_future).await {
-            Ok((dg_res, g_res)) => {
-                if let Some(res) = dg_res {
-                    match res {
-                        Ok(t) => deepgram_result = Some(t),
-                        Err(e) => deepgram_err = Some(e),
+                    Err(e) => {
+                        let msg = e.to_string();
+                        error!("Deepgram task join error: {}", msg);
+                        Some(Err(msg))
                     }
                 }
-                if let Some(res) = g_res {
-                    match res {
-                        Ok(t) => groq_result = Some(t),
-                        Err(e) => groq_err = Some(e),
-                    }
-                }
+            } else {
+                None
             }
-            Err(_) => {
-                warn!("Dual-provider deadline (800ms) expired. Evaluating partial results...");
+        });
+
+        let mut groq_fut = std::pin::pin!(async {
+            if let Some(handle) = groq_task {
+                match handle.await {
+                    Ok(Ok(transcript)) => Some(Ok(transcript)),
+                    Ok(Err(e)) => {
+                        let msg = e.to_string();
+                        warn!("Groq transcription failed: {}", msg);
+                        Some(Err(msg))
+                    }
+                    Err(e) => {
+                        let msg = e.to_string();
+                        error!("Groq task join error: {}", msg);
+                        Some(Err(msg))
+                    }
+                }
+            } else {
+                None
+            }
+        });
+
+        let deadline = tokio::time::sleep(DUAL_PROVIDER_DEADLINE);
+        let mut deadline = std::pin::pin!(deadline);
+
+        let mut dg_done = !has_deepgram;
+        let mut groq_done = !has_groq;
+
+        while !dg_done || !groq_done {
+            tokio::select! {
+                res = &mut dg_fut, if !dg_done => {
+                    dg_done = true;
+                    if let Some(r) = res {
+                        match r {
+                            Ok(t) => deepgram_result = Some(t),
+                            Err(e) => deepgram_err = Some(e),
+                        }
+                    }
+                }
+                res = &mut groq_fut, if !groq_done => {
+                    groq_done = true;
+                    if let Some(r) = res {
+                        match r {
+                            Ok(t) => groq_result = Some(t),
+                            Err(e) => groq_err = Some(e),
+                        }
+                    }
+                }
+                _ = &mut deadline => {
+                    warn!("Dual-provider deadline (800ms) expired. Evaluating partial results...");
+                    break;
+                }
             }
         }
 

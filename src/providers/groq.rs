@@ -55,9 +55,9 @@ pub struct GroqVerboseResponse {
     #[serde(default)]
     pub duration: Option<f64>,
     #[serde(default)]
-    pub segments: Vec<GroqSegment>,
+    pub segments: Option<Vec<GroqSegment>>,
     #[serde(default)]
-    pub words: Vec<GroqWord>,
+    pub words: Option<Vec<GroqWord>>,
 }
 
 #[derive(Debug, Default)]
@@ -75,7 +75,7 @@ pub struct GroqClient {
 impl GroqClient {
     pub fn new(api_key: impl Into<String>) -> Self {
         let client = Client::builder()
-            .timeout(std::time::Duration::from_millis(2500))
+            .timeout(std::time::Duration::from_millis(6000))
             .build()
             .unwrap_or_default();
 
@@ -156,14 +156,21 @@ impl GroqClient {
             });
         }
 
-        let resp_json: GroqVerboseResponse = response.json().await?;
+        let body_text = response.text().await?;
+        let resp_json: GroqVerboseResponse = serde_json::from_str(&body_text).map_err(|e| {
+            warn!(
+                "Groq JSON parsing error: {}. Raw response: {}",
+                e, body_text
+            );
+            GroqError::Json(e)
+        })?;
         let latency_ms = start_time.elapsed().as_millis() as u32;
 
         debug!(
             "Groq Whisper transcription complete in {}ms (words: {}, segments: {})",
             latency_ms,
-            resp_json.words.len(),
-            resp_json.segments.len()
+            resp_json.words.as_ref().map(|w| w.len()).unwrap_or(0),
+            resp_json.segments.as_ref().map(|s| s.len()).unwrap_or(0)
         );
 
         let transcript = assemble_source_transcript(resp_json, latency_ms);
@@ -179,12 +186,13 @@ pub fn logprob_to_confidence(avg_logprob: f64) -> f64 {
 /// Assembles a `SourceTranscript` from Groq's verbose JSON structure,
 /// applying the asymmetric segment-level confidence proxy to all words within that segment.
 pub fn assemble_source_transcript(resp: GroqVerboseResponse, latency_ms: u32) -> SourceTranscript {
-    let mut words = Vec::with_capacity(resp.words.len());
+    let words_list = resp.words.unwrap_or_default();
+    let segments_list = resp.segments.unwrap_or_default();
+    let mut words = Vec::with_capacity(words_list.len());
 
-    for w in resp.words {
+    for w in words_list {
         // Find matching segment by time overlap
-        let segment_confidence = resp
-            .segments
+        let segment_confidence = segments_list
             .iter()
             .find(|seg| w.start >= seg.start - 0.05 && w.end <= seg.end + 0.05)
             .and_then(|seg| seg.avg_logprob)
@@ -227,15 +235,15 @@ mod tests {
         let resp = GroqVerboseResponse {
             text: "Hello world.".to_string(),
             duration: Some(2.45),
-            segments: vec![GroqSegment {
+            segments: Some(vec![GroqSegment {
                 id: 0,
                 start: 0.0,
                 end: 2.45,
                 text: "Hello world.".to_string(),
                 avg_logprob: Some(-0.15),
                 no_speech_prob: Some(0.01),
-            }],
-            words: vec![
+            }]),
+            words: Some(vec![
                 GroqWord {
                     word: "Hello".to_string(),
                     start: 0.12,
@@ -246,7 +254,7 @@ mod tests {
                     start: 0.48,
                     end: 0.82,
                 },
-            ],
+            ]),
         };
 
         let transcript = assemble_source_transcript(resp, 180);

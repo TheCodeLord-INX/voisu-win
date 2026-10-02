@@ -256,6 +256,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
                                                                 // Deterministic Spoken Punctuation & Formatting
                                                                 let formatted = FormattingEngine::format(&arb.selected_text);
+                                                                if formatted.trim().is_empty() {
+                                                                    println!("  [Final Text] (No speech detected)");
+                                                                    println!("------------------------------------------------------------");
+                                                                    overlay_done.hide();
+                                                                    return;
+                                                                }
                                                                 println!("  [Final Text] >>> \"{}\"", formatted);
                                                                 println!("------------------------------------------------------------");
 
