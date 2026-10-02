@@ -16,7 +16,7 @@ use tokio_tungstenite::tungstenite::http::Request;
 use tokio_tungstenite::{MaybeTlsStream, WebSocketStream, connect_async};
 use tracing::{debug, warn};
 
-pub const DEEPGRAM_WS_URL: &str = "wss://api.deepgram.com/v1/listen?model=nova-2&smart_format=true&encoding=linear16&sample_rate=16000&channels=1&endpointing=300&utterance_end_ms=1000&interim_results=true";
+pub const DEEPGRAM_WS_URL: &str = "wss://api.deepgram.com/v1/listen?model=nova-2&smart_format=true&encoding=linear16&sample_rate=16000&channels=1&endpointing=300&utterance_end_ms=1000&interim_results=true&language=en";
 
 #[derive(Error, Debug)]
 pub enum DeepgramError {
@@ -77,12 +77,18 @@ pub struct DeepgramResponse {
 
 pub struct DeepgramClient {
     api_key: String,
+    pub language: String,
 }
 
 impl DeepgramClient {
     pub fn new(api_key: impl Into<String>) -> Self {
+        Self::with_language(api_key, "en")
+    }
+
+    pub fn with_language(api_key: impl Into<String>, language: impl Into<String>) -> Self {
         Self {
             api_key: api_key.into(),
+            language: language.into(),
         }
     }
 
@@ -94,9 +100,12 @@ impl DeepgramClient {
     pub async fn connect(
         &self,
     ) -> Result<WebSocketStream<MaybeTlsStream<TcpStream>>, DeepgramError> {
-        let uri = DEEPGRAM_WS_URL;
+        let uri = format!(
+            "wss://api.deepgram.com/v1/listen?model=nova-2&smart_format=true&encoding=linear16&sample_rate=16000&channels=1&endpointing=300&utterance_end_ms=1000&interim_results=true&language={}",
+            self.language
+        );
         let request = Request::builder()
-            .uri(uri)
+            .uri(&uri)
             .header("Host", "api.deepgram.com")
             .header("Connection", "Upgrade")
             .header("Upgrade", "websocket")

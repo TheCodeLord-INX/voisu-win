@@ -69,11 +69,16 @@ pub struct RateLimitTracker {
 pub struct GroqClient {
     api_key: String,
     client: Client,
+    pub language: String,
     pub rate_limits: Arc<RateLimitTracker>,
 }
 
 impl GroqClient {
     pub fn new(api_key: impl Into<String>) -> Self {
+        Self::with_language(api_key, "en")
+    }
+
+    pub fn with_language(api_key: impl Into<String>, language: impl Into<String>) -> Self {
         let client = Client::builder()
             .timeout(std::time::Duration::from_millis(6000))
             .build()
@@ -82,6 +87,7 @@ impl GroqClient {
         Self {
             api_key: api_key.into(),
             client,
+            language: language.into(),
             rate_limits: Arc::new(RateLimitTracker::default()),
         }
     }
@@ -107,6 +113,7 @@ impl GroqClient {
             .text("model", GROQ_WHISPER_MODEL)
             .text("response_format", "verbose_json")
             .text("timestamp_granularities[]", "word")
+            .text("language", self.language.clone())
             .text("temperature", "0.0");
 
         let response = self
@@ -183,9 +190,62 @@ pub fn logprob_to_confidence(avg_logprob: f64) -> f64 {
     avg_logprob.exp().clamp(0.0, 1.0)
 }
 
+/// Returns true if text matches known Whisper silence/outro hallucinations or non-target scripts.
+pub fn is_whisper_hallucination(text: &str) -> bool {
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        return false;
+    }
+    let lower = trimmed.to_lowercase();
+
+    const ASR_OUTROS: &[&str] = &[
+        "thank you for watching",
+        "thanks for watching",
+        "thank you for watching.",
+        "thanks for watching.",
+        "thank you.",
+        "thank you!",
+        "please subscribe",
+        "subscribe to my channel",
+        "subtitles by",
+        "subtitles by the amara.org community",
+        "translated by",
+        "you",
+        "bye",
+    ];
+
+    if ASR_OUTROS
+        .iter()
+        .any(|&o| lower == o || lower == format!("{}.", o))
+    {
+        return true;
+    }
+
+    // Detect non-English Nordic/Icelandic hallucinated characters (þ, ð, æ)
+    let has_foreign = trimmed
+        .chars()
+        .any(|c| matches!(c, 'þ' | 'Þ' | 'ð' | 'Ð' | 'æ' | 'Æ'));
+    if has_foreign {
+        return true;
+    }
+
+    false
+}
+
 /// Assembles a `SourceTranscript` from Groq's verbose JSON structure,
 /// applying the asymmetric segment-level confidence proxy to all words within that segment.
 pub fn assemble_source_transcript(resp: GroqVerboseResponse, latency_ms: u32) -> SourceTranscript {
+    if is_whisper_hallucination(&resp.text) {
+        debug!("Filtered out Whisper hallucination: '{}'", resp.text);
+        return SourceTranscript {
+            provider: ProviderId::Groq,
+            raw_text: String::new(),
+            words: Vec::new(),
+            duration_ms: (resp.duration.unwrap_or(0.0) * 1000.0) as u32,
+            latency_ms,
+        };
+    }
+
     let words_list = resp.words.unwrap_or_default();
     let segments_list = resp.segments.unwrap_or_default();
     let mut words = Vec::with_capacity(words_list.len());

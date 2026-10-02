@@ -54,6 +54,10 @@ pub struct AppConfig {
     #[serde(default = "default_prefer_external_mic")]
     pub prefer_external_mic: bool,
 
+    /// Transcription language code (default: "en" for English).
+    #[serde(default = "default_language")]
+    pub language: String,
+
     /// Maximum wait time (ms) for target app to consume clipboard before restoring prior content.
     #[serde(default = "default_clipboard_restore_timeout")]
     pub clipboard_restore_timeout_ms: u32,
@@ -65,6 +69,10 @@ pub struct AppConfig {
 
 fn default_prefer_external_mic() -> bool {
     true
+}
+
+fn default_language() -> String {
+    std::env::var("VOISU_TRANSCRIPTION_LANGUAGE").unwrap_or_else(|_| "en".to_string())
 }
 
 fn default_clipboard_restore_timeout() -> u32 {
@@ -83,6 +91,7 @@ impl Default for AppConfig {
             audio_device_id: None,
             native_sample_rate: None,
             prefer_external_mic: true,
+            language: default_language(),
             clipboard_restore_timeout_ms: DEFAULT_CLIPBOARD_RESTORE_TIMEOUT_MS,
             custom_dictionary: Vec::new(),
         }
@@ -270,6 +279,7 @@ mod tests {
             audio_device_id: None,
             native_sample_rate: Some(48000),
             prefer_external_mic: true,
+            language: "en".to_string(),
             clipboard_restore_timeout_ms: 250,
             custom_dictionary: vec!["Kubernetes".to_string(), "gRPC".to_string()],
         };

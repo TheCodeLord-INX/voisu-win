@@ -63,13 +63,13 @@ impl DualProviderCoordinator {
             .deepgram_api_key
             .as_ref()
             .filter(|k| !k.trim().is_empty())
-            .map(|k| Arc::new(DeepgramClient::new(k)));
+            .map(|k| Arc::new(DeepgramClient::with_language(k, &config.language)));
 
         let groq_client = config
             .groq_api_key
             .as_ref()
             .filter(|k| !k.trim().is_empty())
-            .map(|k| Arc::new(GroqClient::new(k)));
+            .map(|k| Arc::new(GroqClient::with_language(k, &config.language)));
 
         Self {
             deepgram_client,

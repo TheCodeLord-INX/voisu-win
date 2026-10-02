@@ -92,6 +92,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             println!("Trigger Key   : {:?}", config.trigger_key);
             println!("Interaction   : {:?}", config.interaction_mode);
             println!("Delivery Mode : {:?}", config.delivery_mode);
+            println!("Language      : {} (Pinned)", config.language);
 
             let audio_engine = match AudioCaptureEngine::with_config(&config) {
                 Ok(engine) => {

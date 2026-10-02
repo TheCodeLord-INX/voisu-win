@@ -156,10 +156,13 @@ impl ArbitrationEngine {
         deepgram: Option<SourceTranscript>,
         groq: Option<SourceTranscript>,
     ) -> Option<ArbitratedTranscript> {
-        match (deepgram, groq) {
-            (Some(dg), Some(gq)) => Some(Self::arbitrate_dual(dg, gq)),
-            (Some(dg), None) => Some(Self::arbitrate_single(dg, ArbitrationMode::SingleDeepgram)),
-            (None, Some(gq)) => Some(Self::arbitrate_single(gq, ArbitrationMode::SingleGroq)),
+        let dg = deepgram.filter(|d| !d.raw_text.trim().is_empty());
+        let gq = groq.filter(|g| !g.raw_text.trim().is_empty());
+
+        match (dg, gq) {
+            (Some(d), Some(g)) => Some(Self::arbitrate_dual(d, g)),
+            (Some(d), None) => Some(Self::arbitrate_single(d, ArbitrationMode::SingleDeepgram)),
+            (None, Some(g)) => Some(Self::arbitrate_single(g, ArbitrationMode::SingleGroq)),
             (None, None) => None,
         }
     }
@@ -242,25 +245,14 @@ impl ArbitrationEngine {
 
                 AlignmentOp::Delete(d_idx) => {
                     let d = &deepgram.words[d_idx];
-                    // If Deepgram token has extremely low confidence and was not in Groq at all, drop it
-                    if d.confidence < UNMATCHED_DEEPGRAM_DROP_THRESHOLD {
-                        debug!(
-                            "Dropping low-confidence unmatched Deepgram token: '{}' ({:.2})",
-                            d.word, d.confidence
-                        );
-                    } else {
-                        let word_str = d.punctuated.as_deref().unwrap_or(&d.word);
-                        final_tokens.push(word_str.to_string());
-                    }
+                    let word_str = d.punctuated.as_deref().unwrap_or(&d.word);
+                    final_tokens.push(word_str.to_string());
                 }
 
                 AlignmentOp::Insert(g_idx) => {
                     let g = &groq.words[g_idx];
-                    // If Groq has high confidence in an extra word that Deepgram missed entirely, include it
-                    if g.confidence >= UNMATCHED_GROQ_ACCEPT_THRESHOLD {
-                        let word_str = g.punctuated.as_deref().unwrap_or(&g.word);
-                        final_tokens.push(word_str.to_string());
-                    }
+                    let word_str = g.punctuated.as_deref().unwrap_or(&g.word);
+                    final_tokens.push(word_str.to_string());
                 }
             }
         }
