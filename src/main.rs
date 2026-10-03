@@ -10,7 +10,6 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::task::JoinHandle;
-use tracing::warn;
 use voisu_win::config::AppConfig;
 use voisu_win::core::arbitration::ArbitrationEngine;
 use voisu_win::core::audio::{AudioCaptureEngine, RecordingSession};
@@ -357,13 +356,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 }
                                 Some(HotkeyEvent::StopRecording) => {
                                     println!("[◼ PROCESSING] Utterance complete. Racing Deepgram & Groq LPUs...");
-                                    overlay.set_processing();
+                                    overlay.hide();
                                     if let Some((dg_task, session)) = current_session.take() {
                                         match session.stop() {
                                             Ok((_, wav_bytes)) => {
                                                 let coord = Arc::clone(&coordinator);
                                                 let inj = Arc::clone(&injector);
-                                                let overlay_done = Arc::clone(&overlay);
                                                 tokio::spawn(async move {
                                                     match coord.resolve_race(dg_task, wav_bytes).await {
                                                         Ok(result) => {
@@ -375,39 +373,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                                                 println!("  [Groq Whisper]    ({}ms): {}", gq.latency_ms, gq.raw_text);
                                                             }
 
-                                                            // Check for Groq LPU Semantic Reconciliation on provider disagreements
-                                                            let reconciled_text = match (&result.deepgram, &result.groq) {
-                                                                (Some(dg), Some(gq)) => {
-                                                                    let dg_text = dg.raw_text.trim();
-                                                                    let gq_text = gq.raw_text.trim();
-
-                                                                    if dg_text.is_empty() || gq_text.is_empty() {
-                                                                        None
-                                                                    } else if dg_text.eq_ignore_ascii_case(gq_text) {
-                                                                        // Identical agreement: deliver immediately (0ms overhead)
-                                                                        None
-                                                                    } else if let Some(reconciler) = coord.reconciler() {
-                                                                        // Semantic reconciliation for Hinglish, Indian names, and acronyms
-                                                                        match reconciler.reconcile(dg_text, gq_text).await {
-                                                                            Ok(res) => {
-                                                                                println!("  [Groq LPU Reconciled] ({}ms): {}", res.latency_ms, res.text);
-                                                                                Some(res.text)
-                                                                            }
-                                                                            Err(e) => {
-                                                                                warn!("Reconciliation skipped: {}. Falling back to Slice B4 arbitration.", e);
-                                                                                None
-                                                                            }
-                                                                        }
-                                                                    } else {
-                                                                        None
-                                                                    }
-                                                                }
-                                                                _ => None,
-                                                            };
-
-                                                            let candidate_text = if let Some(rec) = reconciled_text {
-                                                                rec
-                                                            } else if let Some(arb) = ArbitrationEngine::arbitrate(result.deepgram, result.groq) {
+                                                            let candidate_text = if let Some(arb) = ArbitrationEngine::arbitrate(result.deepgram, result.groq) {
                                                                 if !arb.flipped_regions.is_empty() {
                                                                     println!("  [Arbitration] Applied {} Slice B4 substitutions (Mode: {})", arb.flipped_regions.len(), arb.arbitration_mode);
                                                                     for flip in &arb.flipped_regions {
@@ -426,9 +392,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                                                 println!("  [COMMAND] Spoken 'scratch that' detected. Reverting last dictation...");
                                                                 let _ = inj.synthesize_ctrl_z();
                                                                 println!("------------------------------------------------------------");
-                                                                overlay_done.set_done();
-                                                                tokio::time::sleep(Duration::from_millis(800)).await;
-                                                                overlay_done.hide();
                                                                 return;
                                                             }
 
@@ -437,7 +400,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                                             if formatted.trim().is_empty() {
                                                                 println!("  [Final Text] (No speech detected)");
                                                                 println!("------------------------------------------------------------");
-                                                                overlay_done.hide();
                                                                 return;
                                                             }
                                                             println!("  [Final Text] >>> \"{}\"", formatted);
@@ -455,26 +417,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                                                     eprintln!("[ERROR] Text delivery failed: {}", e);
                                                                 }
                                                             }
-
-                                                            // Visual Pill Feedback: Show Done for 800ms then hide
-                                                            overlay_done.set_done();
-                                                            tokio::time::sleep(Duration::from_millis(800)).await;
-                                                            overlay_done.hide();
                                                         }
                                                         Err(e) => {
                                                             eprintln!("[ERROR] Transcription race failed: {}", e);
-                                                            overlay_done.hide();
                                                         }
                                                     }
                                                 });
                                             }
                                             Err(e) => {
                                                 eprintln!("[ERROR] Failed to stop recording session: {}", e);
-                                                overlay.hide();
                                             }
                                         }
-                                    } else {
-                                        overlay.hide();
                                     }
                                 }
                                 None => break,

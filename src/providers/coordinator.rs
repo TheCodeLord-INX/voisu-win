@@ -211,7 +211,7 @@ impl DualProviderCoordinator {
                             Ok(t) => {
                                 deepgram_result = Some(t);
                                 if grace_timer.is_none() && !groq_done {
-                                    grace_timer = Some(Box::pin(tokio::time::sleep(Duration::from_millis(600))));
+                                    grace_timer = Some(Box::pin(tokio::time::sleep(Duration::from_millis(150))));
                                 }
                             }
                             Err(e) => deepgram_err = Some(e),
@@ -225,7 +225,7 @@ impl DualProviderCoordinator {
                             Ok(t) => {
                                 groq_result = Some(t);
                                 if grace_timer.is_none() && !dg_done {
-                                    grace_timer = Some(Box::pin(tokio::time::sleep(Duration::from_millis(600))));
+                                    grace_timer = Some(Box::pin(tokio::time::sleep(Duration::from_millis(150))));
                                 }
                             }
                             Err(e) => groq_err = Some(e),
